@@ -127,6 +127,7 @@ app.listen(PORT, () => {
    (collects audio from the Realtime WebSocket and returns a data URL)
    This is a minimal sketch; check the Realtime docs for the event schema.
 -------------------------*/
+
 import WebSocket from "ws";
 
 async function speakWithRealtime(summaryText) {
