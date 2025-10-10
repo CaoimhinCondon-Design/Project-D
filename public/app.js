@@ -182,8 +182,9 @@
         break;
       }
       case "transcript": {
-        // data is a string transcript
-        updateCardBody(transcriptEl, typeof data === "string" ? data : "");
+        // supports both plain string payloads and { transcript } objects
+        const transcriptText = typeof data === "string" ? data : data?.transcript;
+        updateCardBody(transcriptEl, typeof transcriptText === "string" ? transcriptText : "");
         break;
       }
       case "token": {
@@ -233,7 +234,8 @@
   function onSubStatus(payload) {
     const stage = payload?.stage || "";
     statusEl.dataset.state = "processing";
-    statusEl.textContent = `${statusLabels.processing}${stage ? ` – ${stage}` : ""}`;
+    const suffix = stage ? ` - ${stage}` : "";
+    statusEl.textContent = `${statusLabels.processing}${suffix}`;
   }
 
   function onFinishedParagraph(payload) {
@@ -364,3 +366,4 @@
     return { event, data };
   }
 })();
+
