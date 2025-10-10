@@ -1,5 +1,15 @@
 {
-  "devDependencies": {
-    "express": "^5.1.0"
+  "name": "openai-mvp-node",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "ws": "^8.18.0"
   }
 }
