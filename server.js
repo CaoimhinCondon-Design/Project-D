@@ -233,8 +233,18 @@ app.post("/api/message/stream", async (req, res) => {
   res.flushHeaders?.();
 
   const sendEvent = (event, payload) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-  };
+    const trimedEvent = event.trim();
+    res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
+  }
+
+  async function workflow(paragraph, index){
+    if (streamClosed) return;
+    sendEvent("subStatus", { stage: `working on paragraph ${index}` });
+    const shortSummary = await summarizeForSpeech(paragraph);
+    const ttsDataUrl = await speakWithTTS(shortSummary);
+    sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
+    return {ttsDataUrl, shortSummary, index}
+}
 
   const controller = new AbortController();
   const { signal } = controller;
@@ -252,33 +262,50 @@ app.post("/api/message/stream", async (req, res) => {
 
     sendEvent("status", { stage: "reasoning" });
     let streamedAnswer = "";
+    let paragraphs = [];
+    let workloadPromises = {};
+    let currentIndex = 0;
     await streamAnswer(transcript, {
       signal,
       onToken: async ({ token, text, done }) => {
         if (streamClosed) return;
+        paragraphs = text.split(/\n/);
+        while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
+          const p = paragraphs[currentIndex].trim();
+          if (p) {
+            workloadPromises[currentIndex] = workflow(p, currentIndex);
+          }
+          currentIndex++;
+        }
         if (done) {
+          const p = paragraphs.at(-1).trim();
+          if (p) {
+            workloadPromises[currentIndex] = workflow(p, currentIndex);
+          }
           streamedAnswer = text?.trim() ?? "";
           sendEvent("answer", { answer: streamedAnswer });
+          const results = await Promise.allSettled(Object.values(workloadPromises));
         } else if (token) {
           sendEvent("token", { token, text });
         }
       }
     });
 
-    sendEvent("status", { stage: "summarizing" });
-    const shortSummary = await summarizeForSpeech(streamedAnswer);
-    sendEvent("summary", { shortSummary });
+    //sendEvent("status", { stage: "summarizing" });
+    //const shortSummary = await summarizeForSpeech(streamedAnswer);
+    //sendEvent("summary", { shortSummary });
 
-    sendEvent("status", { stage: "speaking" });
-    const ttsDataUrl = await speakWithTTS(shortSummary);
-    sendEvent("speech", { ttsDataUrl });
+    //sendEvent("status", { stage: "speaking" });
+    //const ttsDataUrl = await speakWithTTS(shortSummary);
+    //sendEvent("speech", { ttsDataUrl });
 
-    sendEvent("done", {
-      transcript,
-      answer: streamedAnswer,
-      shortSummary,
-      ttsDataUrl
-    });
+    // sendEvent("done", {
+    //   transcript,
+    //   answer: streamedAnswer,
+    //   shortSummary,
+    //   ttsDataUrl
+    // });
+
     if (!streamClosed) res.end();
   } catch (e) {
     if (!streamClosed) {
