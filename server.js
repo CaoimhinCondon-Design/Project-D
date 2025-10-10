@@ -1,6 +1,8 @@
 import express from "express";
 import dotenv from "dotenv";
+import { OpenAI } from "openai";
 dotenv.config();
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -50,101 +52,42 @@ async function completeAnswer(prompt) {
 
 // Helper: call GPT for reasoning with streamed tokens
 async function streamAnswer(prompt, { onToken, signal } = {}) {
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    signal,
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      stream: true,
-      messages: [
-        { role: "system", content: "You are concise and helpful." },
-        { role: "user", content: prompt }
-      ]
-    })
-  });
-  if (!r.ok) throw new Error(await r.text());
-
-  const reader = r.body?.getReader();
-  if (!reader) throw new Error("Streaming not supported in this runtime.");
-
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let fullText = "";
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
+  let fullText = "";
+  let token;
 
-  const extractContent = (delta) => {
-    if (!delta) return "";
-    if (typeof delta.content === "string") return delta.content;
-    if (Array.isArray(delta.content)) {
-      return delta.content
-        .map((part) => {
-          if (!part) return "";
-          if (typeof part === "string") return part;
-          if (typeof part.text === "string") return part.text;
-          if (typeof part.content === "string") return part.content;
-          return "";
-        })
-        .join("");
-    }
-    return "";
-  };
+  const stream = await client.responses.create({
+    model: "gpt-4o-mini",
+    input: [
+        {
+            role: "system",
+            content: "You are concise and helpful.",
+            role: "user",
+            content: prompt,
+        },
+    ],
+    temperature: 0.2,
+    stream: true,
+});
 
-  while (!streamClosed) {
-    const { value, done } = await reader.read();
-    if (value) {
-      buffer += decoder.decode(value, { stream: true });
-    }
-    if (done) {
-      buffer += decoder.decode(new Uint8Array(), { stream: false });
-      streamClosed = true;
-    }
-
-    buffer = buffer.replace(/\r\n/g, "\n");
-    let delimiterIndex;
-    while ((delimiterIndex = buffer.indexOf("\n\n")) !== -1) {
-      const rawEvent = buffer.slice(0, delimiterIndex);
-      buffer = buffer.slice(delimiterIndex + 2);
-
-      const dataLines = rawEvent
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .filter(Boolean);
-
-      for (const dataLine of dataLines) {
-        if (dataLine === "[DONE]") {
-          streamClosed = true;
-          break;
-        }
-        let payload;
-        try {
-          payload = JSON.parse(dataLine);
-        } catch {
-          continue;
-        }
-        const delta = payload.choices?.[0]?.delta;
-        const token = extractContent(delta);
+for await (const event of stream) {
+    if (event.type === 'response.output_text.delta'){
+        token = event.delta;
         if (!token) continue;
         fullText += token;
         if (safeOnToken) {
           await safeOnToken({ token, text: fullText });
         }
-      }
-      if (streamClosed) break;
     }
-  }
+    if (streamClosed) break;
+}
 
-  if (safeOnToken) {
+if (safeOnToken) {
     await safeOnToken({ done: true, text: fullText });
   }
 
+  console.log(fullText)
   return fullText.trim();
 }
 
@@ -223,6 +166,7 @@ app.post("/api/message", async (req, res) => {
  * Streams GPT tokens (SSE) while preserving the existing processing pipeline.
  */
 app.post("/api/message/stream", async (req, res) => {
+  console.log("using stream post")
   const { audioBase64 } = req.body;
   if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
 
@@ -234,11 +178,16 @@ app.post("/api/message/stream", async (req, res) => {
 
   const sendEvent = (event, payload) => {
     const trimedEvent = event.trim();
+    let info = ""
+    if (trimedEvent == "status" && payload.stage){
+      info = payload.stage
+    }
+    console.log("Sent Event: " + event + " " + info)
     res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
   async function workflow(paragraph, index){
-    if (streamClosed) return;
+    //if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
     const shortSummary = await summarizeForSpeech(paragraph);
     const ttsDataUrl = await speakWithTTS(shortSummary);
@@ -259,6 +208,7 @@ app.post("/api/message/stream", async (req, res) => {
     sendEvent("status", { stage: "transcribing" });
     const transcript = await transcribeWebmBase64(audioBase64);
     sendEvent("transcript", { transcript });
+    console.log(transcript)
 
     sendEvent("status", { stage: "reasoning" });
     let streamedAnswer = "";
@@ -268,7 +218,9 @@ app.post("/api/message/stream", async (req, res) => {
     await streamAnswer(transcript, {
       signal,
       onToken: async ({ token, text, done }) => {
-        if (streamClosed) return;
+        //console.log("running onToken");
+        //if (streamClosed) return;
+        //console.log("still running");
         paragraphs = text.split(/\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
           const p = paragraphs[currentIndex].trim();
@@ -285,19 +237,15 @@ app.post("/api/message/stream", async (req, res) => {
           streamedAnswer = text?.trim() ?? "";
           sendEvent("answer", { answer: streamedAnswer });
           const results = await Promise.allSettled(Object.values(workloadPromises));
+          console.log("\n\n\n\n\n\n results \n\n")
+          for (const result of results) {
+            console.log(result)
+          }
         } else if (token) {
           sendEvent("token", { token, text });
         }
       }
     });
-
-    //sendEvent("status", { stage: "summarizing" });
-    //const shortSummary = await summarizeForSpeech(streamedAnswer);
-    //sendEvent("summary", { shortSummary });
-
-    //sendEvent("status", { stage: "speaking" });
-    //const ttsDataUrl = await speakWithTTS(shortSummary);
-    //sendEvent("speech", { ttsDataUrl });
 
     // sendEvent("done", {
     //   transcript,
