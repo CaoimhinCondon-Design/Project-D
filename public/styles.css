@@ -370,3 +370,38 @@ body {
     color: #f8fafc;
   }
 }
+
+/* === Code formatting (Markdown + highlight.js) === */
+
+/* Ensure monospace for inline and block code */
+.card__body pre,
+.card__body code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+/* Block code appearance + fallback colors if the HLJS theme doesn't load */
+.card__body pre {
+  background: #0b1220;     /* fallback dark navy */
+  color: #e2e8f0;          /* fallback text */
+  padding: 1rem;
+  border-radius: 0.75rem;
+  overflow: auto;
+  margin: 0.5rem 0 0;
+  line-height: 1.55;
+  font-size: 0.9rem;
+}
+
+/* Let the highlight.js theme control colors (our pre provides the fallback) */
+.hljs {
+  background: transparent; /* don't fight the theme */
+  line-height: 1.55;
+  font-size: 0.9rem;
+}
+
+/* Light-mode fallback tweak (keeps contrast good when no theme CSS) */
+@media (prefers-color-scheme: light) {
+  .card__body pre {
+    background: #0f172a;   /* near-black */
+    color: #f8fafc;
+  }
+}

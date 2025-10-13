@@ -15,6 +15,9 @@
   // Debug
   const STREAM_DEBUG = true;
 
+  // Custom event name to signal forced SSE close (so promises resolve cleanly)
+  const SSE_FORCE_EVENT = "SSE_FORCE_CLOSE";
+
   // ==============================
   // State
   // ==============================
@@ -454,7 +457,7 @@
       audioPlaying = false;
       updateAudio(audioEl, null);
 
-      await openEventStream(); // robust; always resolves (watchdogs)
+      await openEventStream(); // robust; resolves reliably
       setStatus("done");
     } catch (err) {
       console.error(err);
@@ -491,7 +494,7 @@
   }
 
   // ==============================
-  // Networking — GET SSE (robust)
+  // Networking — GET SSE (robust + listens for forced close)
   // ==============================
   async function openEventStream() {
     sLog("Opening GET SSE:", STREAM_ROUTE);
@@ -511,6 +514,7 @@
 
       function clearAll() {
         try { clearInterval(watchdog); } catch {}
+        try { window.removeEventListener(SSE_FORCE_EVENT, onForcedClose); } catch {}
       }
 
       function end(ok, why = "") {
@@ -524,6 +528,10 @@
       }
 
       function bumpActivity() { lastActivity = Date.now(); }
+
+      // Resolve immediately if we force-close from elsewhere (e.g., Start/interrupt)
+      const onForcedClose = () => end(true, "externally_closed");
+      window.addEventListener(SSE_FORCE_EVENT, onForcedClose, { once: true });
 
       // Watchdog timers (inactivity + hard close)
       const watchdog = setInterval(() => {
@@ -584,7 +592,7 @@
         end(true, "server_done_event");
       });
 
-      // Server-sent error payloads
+      // Server-sent error payloads / normal EOS via onerror
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
@@ -620,7 +628,7 @@
       audioPlaying = false;
     } catch {}
 
-    // Close any live SSE stream
+    // Close any live SSE stream (broadcast a forced-close so listeners resolve)
     forceCloseSSE("interrupt");
 
     // UI nudge to show we're switching to user
@@ -637,11 +645,12 @@
     }
   }
 
-  // Allow other code paths to forcibly close a stuck stream
+  // Allow other code paths to forcibly close a stuck stream (and notify listeners)
   function forceCloseSSE(reason = "client_close") {
     if (currentEventSource) {
       try { currentEventSource.close(); } catch {}
       currentEventSource = null;
+      try { window.dispatchEvent(new CustomEvent(SSE_FORCE_EVENT)); } catch {}
       sLog("SSE: force-closed (" + reason + ")");
     }
   }
@@ -658,6 +667,11 @@
       s.onerror = () => reject(new Error("Failed to load " + src));
       document.head.appendChild(s);
     });
+  }
+
+  // Replace “smart” quotes/backticks (some models emit these) so fences parse
+  function normalizeFences(md) {
+    return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
 
   async function ensureMarkdown() {
@@ -685,6 +699,7 @@
       await loadScript("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js");
       const link = document.createElement("link");
       link.rel = "stylesheet";
+      // Pick any theme you like:
       link.href = "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css";
       document.head.appendChild(link);
     }
@@ -693,15 +708,21 @@
 
   async function renderMarkdown(el, mdText) {
     await ensureMarkdown();
-    const html = DOMPurify.sanitize(marked.parse(mdText || ""));
-    // since your elements are <pre>, make them behave like blocks
+    const html = DOMPurify.sanitize(marked.parse(normalizeFences(mdText)));
+
+    // If the container is a <pre>, wrap real HTML inside a div to avoid nested <pre> quirks
+    const needsWrapper = el.tagName === "PRE";
+    const rendered = needsWrapper ? `<div class="md-root">${html}</div>` : html;
+
+    // Make the container behave like a normal block
     el.style.whiteSpace = "normal";
     el.style.fontFamily = "inherit";
-    el.innerHTML = html;
+    el.innerHTML = rendered;
 
-    // code highlighting
+    // Syntax highlighting
     await ensureHighlighting();
-    el.querySelectorAll("pre code").forEach(block => {
+    const scope = needsWrapper ? el.querySelector(".md-root") : el;
+    scope.querySelectorAll("pre code").forEach(block => {
       try { hljs.highlightElement(block); } catch {}
     });
   }
