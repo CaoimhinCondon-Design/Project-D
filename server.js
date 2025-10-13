@@ -224,8 +224,6 @@ app.post("/api/message/stream", async (req, res) => {
 })
 
 app.get("/api/message/stream", async (req, res) => {
-  console.log("using stream post")
-
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -239,7 +237,7 @@ app.get("/api/message/stream", async (req, res) => {
     if (trimedEvent == "status" && payload.stage){
       info = payload.stage
     }
-    //console.log("Sent Event: " + event + " " + info)
+    console.log("Sent Event: " + event + " " + info)
     res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
