@@ -1,31 +1,49 @@
 // Immediately Invoked Function Expression (IIFE) to avoid leaking variables into the global scope.
 (() => {
-  // --- Recording state ---
+  // ==============================
+  // Config
+  // ==============================
+  const FORCE_VAD = false;            // Set true to skip Web Speech and always use VAD
+  const VAD_THRESH = 0.02;            // Voice activity RMS threshold (raise if too sensitive)
+  const VAD_HANG_MS = 400;            // Hangover to avoid flapping during short pauses
+  const AUTO_STOP_SILENCE_MS = 1200;  // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_MIN_MS = 500;       // Don't auto-stop before at least this much audio is captured
+
+  // ==============================
+  // State
+  // ==============================
   let mediaRecorder;
   let mediaChunks = [];
   let activeStream = null;
 
-  // --- Event stream / interrupt state (NEW) ---
+  // Event stream / interrupt state
   let currentEventSource = null;
   let interrupting = false;
 
-  // --- Speech / VAD configuration (NEW) ---
-  // Force the VAD fallback and skip Web Speech entirely (set true if you just want it working now)
-  const FORCE_VAD = false;
-
-  // Web Speech state
+  // SpeechRecognition / VAD
   let recognition = null;
   let recognitionRunning = false;
   let recognitionManuallyPaused = false;
-  let vadStopFn = null; // fallback VAD stopper
+  let vadStopFn = null;
+
+  // Voice toggle
+  let voiceEnabled = false;
 
   // SR error handling
   let srNetworkErrorCount = 0;
-  const SR_NETWORK_ERROR_LIMIT = 3;        // after 3 consecutive network errors…
-  const SR_ERROR_WINDOW_MS = 5000;         // …within this window
+  const SR_NETWORK_ERROR_LIMIT = 3;
+  const SR_ERROR_WINDOW_MS = 5000;
   let srErrorWindowStart = 0;
 
-  // --- Debug helper ---
+  // Auto-stop tracking
+  let recordingStartedAt = 0;
+  let lastSpeechTs = 0;
+  let talking = false;
+  let autoStopping = false;
+
+  // ==============================
+  // Debug
+  // ==============================
   const STREAM_DEBUG = true;
   function sLog(...args) {
     if (!STREAM_DEBUG) return;
@@ -33,22 +51,21 @@
     console.log(`[stream ${ts}]`, ...args);
   }
 
-  // --- Endpoints ---
+  // ==============================
+  // Endpoints
+  // ==============================
   const STREAM_ROUTE = "/api/message/stream"; // POST (transcript) + GET (SSE)
 
-  // --- UI refs ---
+  // ==============================
+  // UI refs
+  // ==============================
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const statusEl = document.getElementById("status");
   const transcriptEl = document.getElementById("transcript");
   const answerEl = document.getElementById("answer");
   const audioEl = document.getElementById("audio");
-  const voiceToggleBtn = document.getElementById("voiceToggle"); // optional
-
-  const placeholders = {
-    transcript: "Waiting for transcript...",
-    answer: "Waiting for answer...",
-  };
+  const voiceToggleBtn = document.getElementById("voiceToggle");
 
   const statusLabels = {
     idle: "Idle",
@@ -58,7 +75,9 @@
     error: "Error",
   };
 
-  // --- Audio queue for TTS clips ---
+  // ==============================
+  // Audio queue for TTS clips
+  // ==============================
   const audioQueue = [];
   let audioPlaying = false;
 
@@ -74,9 +93,7 @@
     if (!next) return;
     audioPlaying = true;
     updateAudio(audioEl, next);
-    audioEl.play().catch(() => {
-      // Some browsers require a user gesture first.
-    });
+    audioEl.play().catch(() => {});
   }
 
   audioEl.addEventListener("ended", () => {
@@ -84,42 +101,91 @@
     maybePlayNext();
   });
 
-  // --- Init UI ---
+  // ==============================
+  // Init
+  // ==============================
   setStatus("idle");
   updateCardBody(transcriptEl, "");
   updateCardBody(answerEl, "");
   resetRecordingState();
 
-  // Start is now a toggle: start or cancel recording
   startBtn.addEventListener("click", handleStartToggle);
   stopBtn.addEventListener("click", handleStopRecording);
+  attachVoiceToggle();
 
   // ==============================
-  // Voice detection setup (SR with auto-fallback to VAD)
+  // Voice toggle (SR with VAD fallback)
   // ==============================
-  setupSpeechDetection();
+  function attachVoiceToggle() {
+    if (!voiceToggleBtn) return;
+    updateVoiceToggleUi();
 
-  function setupSpeechDetection() {
+    voiceToggleBtn.addEventListener("click", async () => {
+      if (!voiceEnabled) {
+        await enableVoice();
+      } else {
+        await disableVoice();
+      }
+      updateVoiceToggleUi();
+    });
+  }
+
+  async function enableVoice() {
+    // Ensure mic permission up-front for better reliability
+    try {
+      await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (e) {
+      alert("Please allow microphone access to enable Voice mode.");
+      return;
+    }
+
     if (FORCE_VAD) {
-      sLog("FORCE_VAD enabled → starting VAD fallback");
-      startVADFallback();
-      uiMarkVoiceOn("(VAD)");
+      sLog("Voice: enabling VAD (FORCE_VAD)");
+      await startVADFallback();
+      voiceEnabled = true;
       return;
     }
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      sLog("SpeechRecognition not available; starting VAD fallback");
-      startVADFallback();
-      uiMarkVoiceOn("(VAD)");
+      sLog("Voice: SR unavailable → enabling VAD fallback");
+      await startVADFallback();
+      voiceEnabled = true;
       return;
     }
 
     initSpeechRecognition(SR);
     safeStartRecognition();
-    uiMarkVoiceOn("(SR)");
+    await startVADFallback(); // Use VAD alongside SR for robust end-of-speech detection
+    voiceEnabled = true;
   }
 
+  async function disableVoice() {
+    sLog("Voice: disabling");
+    voiceEnabled = false;
+
+    // Stop SR if running
+    if (recognition) {
+      recognitionManuallyPaused = true;
+      try { recognition.stop(); } catch {}
+    }
+
+    // Stop VAD if active
+    if (typeof vadStopFn === "function") {
+      try { vadStopFn(); } catch {}
+      vadStopFn = null;
+    }
+  }
+
+  function updateVoiceToggleUi() {
+    if (!voiceToggleBtn) return;
+    voiceToggleBtn.textContent = voiceEnabled ? "Disable Voice" : "Enable Voice";
+    voiceToggleBtn.classList.toggle("button--active", voiceEnabled);
+  }
+
+  // ==============================
+  // SpeechRecognition (wake/interrupt)
+  // ==============================
   function initSpeechRecognition(SR) {
     if (recognition) return; // init once
     recognition = new SR();
@@ -136,35 +202,19 @@
     recognition.onend = () => {
       recognitionRunning = false;
       sLog("SpeechRecognition ended; manuallyPaused?", recognitionManuallyPaused);
-      if (!recognitionManuallyPaused) {
-        setTimeout(safeStartRecognition, 600);
-      }
+      if (voiceEnabled && !recognitionManuallyPaused) setTimeout(safeStartRecognition, 600);
     };
 
-    // Fired when speech is detected — this is our "wake"
+    // Treat audio start as a user interrupt to begin capture
     recognition.onaudiostart = () => {
-      sLog("SpeechRecognition detected audio start → interrupt AI");
-      interruptAI(); // closes SSE + pauses TTS
+      if (!voiceEnabled) return;
+      sLog("SR onaudiostart → interrupt AI");
+      interruptAI();
+      // We don't start/stop here; VAD handles precise start/end
     };
 
-    recognition.onresult = (event) => {
-      const res = event.results?.[event.results.length - 1];
-      const transcript = res?.[0]?.transcript?.trim() ?? "";
-      sLog("SpeechRecognition result:", transcript);
-
-      // Pause while we capture mic for MediaRecorder flow
-      pauseRecognitionForRecording();
-
-      if (!mediaRecorder || mediaRecorder.state !== "recording") {
-        handleStartRecording()
-          .catch((err) => sLog("Start recording failed:", err))
-          .finally(() => {
-            // If recording didn’t start, resume SR so user can try again
-            if (!mediaRecorder || mediaRecorder.state !== "recording") {
-              resumeRecognitionAfterRecording();
-            }
-          });
-      }
+    recognition.onresult = () => {
+      // We rely on VAD for start. Keep SR just for wake/interrupt in some browsers.
     };
 
     recognition.onerror = (e) => {
@@ -178,26 +228,23 @@
           srNetworkErrorCount = 0;
         }
         srNetworkErrorCount++;
-        if (srNetworkErrorCount >= SR_NETWORK_ERROR_LIMIT) {
-          sLog("Persistent SR network errors → switching to VAD");
+        if (srNetworkErrorCount >= SR_NETWORK_ERROR_LIMIT && voiceEnabled) {
+          sLog("Persistent SR network errors → continue with VAD only");
           recognitionManuallyPaused = true;
           try { recognition.stop(); } catch {}
-          startVADFallback();
-          uiMarkVoiceOn("(VAD)");
+          // VAD remains active; no further action needed
         }
       }
 
       if (err === "not-allowed" || err === "service-not-allowed") {
         recognitionManuallyPaused = true;
         try { recognition.stop(); } catch {}
-        startVADFallback();
-        uiMarkVoiceOn("(VAD)");
+        // VAD remains active
       }
     };
 
-    // Keep it alive across tab visibility changes
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && !recognitionManuallyPaused) {
+      if (document.visibilityState === "visible" && voiceEnabled && !recognitionManuallyPaused) {
         safeStartRecognition();
       }
     });
@@ -205,34 +252,23 @@
 
   function safeStartRecognition() {
     if (!recognition || recognitionRunning) return;
-    try { recognition.start(); } catch (e) {
-      // Thrown if already started; safe to ignore.
-    }
+    try { recognition.start(); } catch {}
   }
 
   function pauseRecognitionForRecording() {
-    if (!recognition) return;
+    if (!recognition || !voiceEnabled) return;
     recognitionManuallyPaused = true;
-    if (recognitionRunning) {
-      try { recognition.stop(); } catch {}
-    }
+    if (recognitionRunning) { try { recognition.stop(); } catch {} }
   }
 
   function resumeRecognitionAfterRecording() {
-    if (!recognition) return;
+    if (!recognition || !voiceEnabled) return;
     recognitionManuallyPaused = false;
     safeStartRecognition();
   }
 
-  // Minimal UI helper (optional)
-  function uiMarkVoiceOn(mode) {
-    if (!voiceToggleBtn) return;
-    voiceToggleBtn.disabled = true;
-    voiceToggleBtn.textContent = `🎙️ Voice On ${mode || ""}`;
-  }
-
   // ==============================
-  // VAD fallback (Web Audio) — works everywhere with getUserMedia
+  // VAD fallback (also used for end-of-speech auto-stop)
   // ==============================
   async function startVADFallback() {
     try {
@@ -244,40 +280,54 @@
       src.connect(analyser);
 
       const buf = new Float32Array(analyser.fftSize);
-      let talking = false;
-      let lastSpeechTs = 0;
 
-      const THRESH = 0.02;   // adjust if too sensitive / not sensitive enough
-      const HANG_MS = 400;   // hangover to avoid flapping
-
-      sLog("VAD fallback running");
+      sLog("VAD running (also handles end-of-speech auto-stop)");
       let rafId = 0;
 
       function loop() {
+        if (!voiceEnabled) return; // stop sampling if disabled
         analyser.getFloatTimeDomainData(buf);
-        // compute RMS
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) {
-          const x = buf[i];
-          sum += x * x;
-        }
-        const rms = Math.sqrt(sum / buf.length);
 
+        // Compute RMS
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const rms = Math.sqrt(sum / buf.length);
         const now = performance.now();
-        if (rms > THRESH) {
+
+        // Detect speech start/ongoing
+        if (rms > VAD_THRESH) {
           lastSpeechTs = now;
           if (!talking) {
             talking = true;
-            sLog("VAD speech start → interrupt & start recording");
+            sLog("VAD speech start");
+            // If AI is speaking/streaming, interrupt and start recording
             interruptAI();
-            if (!mediaRecorder || mediaRecorder.state !== "recording") {
+            if (!isRecording()) {
+              pauseRecognitionForRecording();
               handleStartRecording().catch((e) => sLog("VAD start recording failed:", e));
             }
           }
-        } else if (talking && now - lastSpeechTs > HANG_MS) {
-          talking = false;
-          sLog("VAD speech end");
+        } else {
+          // Silence logic / hangover
+          if (talking && now - lastSpeechTs > VAD_HANG_MS) {
+            talking = false; // we consider user paused/finished
+          }
         }
+
+        // Auto-stop on sustained silence while recording
+        if (isRecording()) {
+          const recMs = now - recordingStartedAt;
+          const silenceMs = now - lastSpeechTs;
+          if (!autoStopping && recMs > AUTO_STOP_MIN_MS && silenceMs > AUTO_STOP_SILENCE_MS) {
+            autoStopping = true;
+            sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & send`);
+            handleStopRecording().finally(() => {
+              autoStopping = false;
+              resumeRecognitionAfterRecording();
+            });
+          }
+        }
+
         rafId = requestAnimationFrame(loop);
       }
       loop();
@@ -288,66 +338,23 @@
         try { stream.getTracks().forEach(t => t.stop()); } catch {}
       };
     } catch (e) {
-      sLog("VAD fallback failed to init:", e);
+      sLog("VAD init failed:", e);
     }
   }
 
   // ==============================
-  // Start button toggle (Start/Cancel)
+  // Buttons / Recording flow
   // ==============================
   async function handleStartToggle() {
-    // Pause any currently playing audio when Start is clicked
-    try {
-      if (audioEl && !audioEl.paused) audioEl.pause();
-    } catch {}
-
-    // If currently recording, treat Start as "cancel"
-    if (mediaRecorder && mediaRecorder.state === "recording") {
+    try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
+    if (isRecording()) {
       await cancelRecording();
       return;
     }
-
-    // Otherwise begin a fresh recording
-    pauseRecognitionForRecording();
+    if (voiceEnabled) pauseRecognitionForRecording();
     await handleStartRecording();
   }
 
-  // ==============================
-  // Cancel recording — discard audio, no POST/SSE
-  // ==============================
-  async function cancelRecording() {
-    sLog("Cancelling recording via Start toggle");
-
-    // UI: back to idle
-    setStatus("idle");
-    setButtonsState({ start: false, stop: true });
-
-    // Stop the MediaRecorder without using _stopPromise (we're discarding)
-    try {
-      if (mediaRecorder && mediaRecorder.state === "recording") {
-        mediaRecorder.stop();
-      }
-    } catch {}
-
-    // Stop mic tracks
-    if (activeStream) {
-      try {
-        activeStream.getTracks().forEach((t) => t.stop());
-      } catch {}
-      activeStream = null;
-    }
-
-    // Clear state
-    mediaRecorder = null;
-    mediaChunks = [];
-
-    // Resume hands-free listening
-    resumeRecognitionAfterRecording();
-  }
-
-  // ==============================
-  // Recording
-  // ==============================
   async function handleStartRecording() {
     try {
       activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -358,6 +365,8 @@
 
       mediaRecorder = new MediaRecorder(activeStream, mime ? { mimeType: mime } : undefined);
       mediaChunks = [];
+      recordingStartedAt = performance.now();
+      lastSpeechTs = performance.now(); // seed so immediate auto-stop doesn't trigger
 
       mediaRecorder.addEventListener("dataavailable", ({ data }) => {
         if (data?.size) mediaChunks.push(data);
@@ -377,18 +386,17 @@
       mediaRecorder._stopPromise = stopPromise;
       mediaRecorder.start();
       setStatus("recording");
-      setButtonsState({ start: true, stop: false }); // disable Start, enable Stop
+      setButtonsState({ start: true, stop: false });
     } catch (err) {
       console.error(err);
       alert("Microphone permission is required.");
       resetRecordingState();
-      // If we failed to start recording, resume the wake listener
-      resumeRecognitionAfterRecording();
+      if (voiceEnabled) resumeRecognitionAfterRecording();
     }
   }
 
   async function handleStopRecording() {
-    if (!mediaRecorder || mediaRecorder.state !== "recording") return;
+    if (!isRecording()) return;
 
     setButtonsState({ start: true, stop: true });
     setStatus("processing");
@@ -402,11 +410,10 @@
     }
 
     try {
-      // 1) Build base64 from recorded blob
+      // Build base64 and POST
       const blob = await stopPromise;
       const audioBase64 = await blobToBase64(blob);
 
-      // 2) POST audio → get written transcript (NO SSE here)
       const postRes = await fetch(STREAM_ROUTE, {
         method: "POST",
         headers: {
@@ -424,14 +431,13 @@
       }
 
       const { transcript } = await postRes.json();
-      sLog("Transcript received from POST:", transcript?.slice(0, 160) || "<empty>");
+      sLog("Transcript from POST:", transcript?.slice(0, 160) || "<empty>");
       updateCardBody(transcriptEl, transcript || "");
       updateCardBody(answerEl, "");
       audioQueue.length = 0;
       audioPlaying = false;
       updateAudio(audioEl, null);
 
-      // 3) GET SSE stream for reasoning + TTS
       await openEventStream();
       setStatus("done");
     } catch (err) {
@@ -440,9 +446,32 @@
       setStatus("error");
     } finally {
       resetRecordingState();
-      // After we finish a full request/response cycle, resume the wake listener
-      resumeRecognitionAfterRecording();
+      if (voiceEnabled) resumeRecognitionAfterRecording();
     }
+  }
+
+  async function cancelRecording() {
+    sLog("Cancel recording");
+    setStatus("idle");
+    setButtonsState({ start: false, stop: true });
+
+    try {
+      if (isRecording()) mediaRecorder.stop();
+    } catch {}
+
+    if (activeStream) {
+      try { activeStream.getTracks().forEach((t) => t.stop()); } catch {}
+      activeStream = null;
+    }
+
+    mediaRecorder = null;
+    mediaChunks = [];
+
+    if (voiceEnabled) resumeRecognitionAfterRecording();
+  }
+
+  function isRecording() {
+    return mediaRecorder && mediaRecorder.state === "recording";
   }
 
   // ==============================
@@ -458,9 +487,7 @@
       let sawAnyData = false;
 
       const end = (ok) => {
-        try {
-          es.close();
-        } catch {}
+        try { es.close(); } catch {}
         if (currentEventSource === es) currentEventSource = null;
         ok ? resolve() : reject(new Error("SSE error"));
       };
@@ -507,17 +534,12 @@
       es.addEventListener("finishedParagraph", (e) => {
         sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl); // data:audio/mpeg;base64,...
+        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
       });
 
-      // Server heartbeat
-      es.addEventListener("Heartbeat", () => {
-        /* keep-alive */
-      });
+      es.addEventListener("Heartbeat", () => {});
 
-      // Server error payloads (e.g., { message: "no_transcript_available" })
       es.addEventListener("error", (e) => {
-        // Note: EventSource 'error' is also fired on normal close; handle below
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
           updateCardBody(answerEl, `Error: ${payload.message}`);
@@ -526,22 +548,15 @@
         }
       });
 
-      // Connection close: EventSource sets onerror when the stream ends.
       es.onerror = () => {
-        // If we saw any frames, consider this a clean end; else raise an error.
-        if (sawAnyData) {
-          setStatus("done");
-          end(true);
-        } else {
-          setStatus("error");
-          end(false);
-        }
+        if (sawAnyData) { setStatus("done"); end(true); }
+        else { setStatus("error"); end(false); }
       };
     });
   }
 
   // ==============================
-  // Interrupt logic (NEW)
+  // Interrupt logic
   // ==============================
   function interruptAI() {
     if (interrupting) return;
@@ -565,8 +580,8 @@
     setStatusLabel("Listening…");
 
     // If we were already recording, leave it; otherwise start recording
-    if (!mediaRecorder || mediaRecorder.state !== "recording") {
-      pauseRecognitionForRecording();
+    if (!isRecording()) {
+      if (voiceEnabled) pauseRecognitionForRecording();
       handleStartRecording().finally(() => {
         interrupting = false;
       });
@@ -579,11 +594,7 @@
   // Helpers
   // ==============================
   function safeParse(s) {
-    try {
-      return JSON.parse(s);
-    } catch {
-      return null;
-    }
+    try { return JSON.parse(s); } catch { return null; }
   }
 
   function updateAudio(el, dataUrl) {
@@ -591,9 +602,7 @@
       el.src = dataUrl;
       el.removeAttribute("hidden");
       el.load();
-      el.play().catch(() => {
-        // Autoplay may require a user gesture first.
-      });
+      el.play().catch(() => {});
     } else {
       el.setAttribute("hidden", "hidden");
       el.removeAttribute("src");
@@ -621,16 +630,13 @@
     setButtonsState({ start: false, stop: true });
     mediaRecorder = null;
     mediaChunks = [];
-    if (activeStream) {
-      activeStream.getTracks().forEach((t) => t.stop());
-      activeStream = null;
-    }
+    if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
   }
 
   function updateCardBody(element, value) {
     const text = typeof value === "string" ? value.trim() : "";
     const isTranscript = element.id === "transcript";
-    const placeholder = isTranscript ? placeholders.transcript : placeholders.answer;
+    const placeholder = isTranscript ? "Waiting for transcript..." : "Waiting for answer...";
 
     if (text.length === 0) {
       element.dataset.empty = "true";
@@ -638,14 +644,12 @@
     } else {
       element.dataset.empty = "false";
       element.textContent = value;
-      flashCard(element.closest(".card"));
+      const card = element.closest(".card");
+      if (card) {
+        card.classList.add("card--active");
+        window.setTimeout(() => card.classList.remove("card--active"), 900);
+      }
     }
-  }
-
-  function flashCard(card) {
-    if (!card) return;
-    card.classList.add("card--active");
-    window.setTimeout(() => card.classList.remove("card--active"), 900);
   }
 
   async function blobToBase64(blob) {
