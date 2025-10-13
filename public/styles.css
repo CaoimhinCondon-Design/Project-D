@@ -405,3 +405,15 @@ body {
     color: #f8fafc;
   }
 }
+
+/* Make KaTeX math size/line-height fit your cards */
+.card__body .katex {
+  font-size: 1.0rem;
+  line-height: 1.4;
+}
+
+/* Allow math to scroll horizontally if long */
+.card__body .katex-display {
+  overflow-x: auto;
+  padding: 0.25rem 0;
+}

@@ -51,9 +51,10 @@
   let talking = false;
   let autoStopping = false;
 
-  // Markdown
+  // Markdown / Code / Math
   let MD_READY = false;
   let HL_READY = false;
+  let KATEX_READY = false;
 
   // ==============================
   // UI refs
@@ -61,8 +62,9 @@
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const statusEl = document.getElementById("status");
-  const transcriptEl = document.getElementById("transcript");
-  const answerEl = document.getElementById("answer");
+  // Use let so we can swap <pre> -> <div> (needed for KaTeX & HTML)
+  let transcriptEl = document.getElementById("transcript");
+  let answerEl = document.getElementById("answer");
   const audioEl = document.getElementById("audio");
   const voiceToggleBtn = document.getElementById("voiceToggle"); // optional
 
@@ -139,7 +141,6 @@
   }
 
   async function enableVoice() {
-    // Ensure mic permission up-front for better reliability
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
@@ -147,7 +148,6 @@
       return;
     }
 
-    // Always run VAD: it gives us the end-of-speech auto stop
     await startVADFallback();
 
     if (FORCE_VAD) {
@@ -172,13 +172,11 @@
     sLog("Voice: disabling");
     voiceEnabled = false;
 
-    // Stop SR if running
     if (recognition) {
       recognitionManuallyPaused = true;
       try { recognition.stop(); } catch {}
     }
 
-    // Stop VAD if active
     if (typeof vadStopFn === "function") {
       try { vadStopFn(); } catch {}
       vadStopFn = null;
@@ -213,17 +211,13 @@
       if (voiceEnabled && !recognitionManuallyPaused) setTimeout(safeStartRecognition, 600);
     };
 
-    // Treat audio start as a user interrupt to begin capture
     recognition.onaudiostart = () => {
       if (!voiceEnabled) return;
       sLog("SR onaudiostart → interrupt AI");
       interruptAI();
-      // VAD handles exact start/stop and auto-stop
     };
 
-    recognition.onresult = () => {
-      // We rely on VAD for precise timing; SR just wakes/interrupts
-    };
+    recognition.onresult = () => {};
 
     recognition.onerror = (e) => {
       const err = e?.error;
@@ -291,22 +285,19 @@
       let rafId = 0;
 
       function loop() {
-        if (!voiceEnabled) return; // stop sampling if disabled
+        if (!voiceEnabled) return;
         analyser.getFloatTimeDomainData(buf);
 
-        // Compute RMS
         let sum = 0;
         for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
         const rms = Math.sqrt(sum / buf.length);
         const now = performance.now();
 
-        // Detect speech start/ongoing
         if (rms > VAD_THRESH) {
           lastSpeechTs = now;
           if (!talking) {
             talking = true;
             sLog("VAD speech start");
-            // If AI is speaking/streaming, interrupt and start recording
             interruptAI();
             if (!isRecording()) {
               pauseRecognitionForRecording();
@@ -314,13 +305,11 @@
             }
           }
         } else {
-          // Silence logic / hangover
           if (talking && now - lastSpeechTs > VAD_HANG_MS) {
-            talking = false; // consider user paused/finished
+            talking = false;
           }
         }
 
-        // Auto-stop on sustained silence while recording
         if (isRecording()) {
           const recMs = now - recordingStartedAt;
           const silenceMs = now - lastSpeechTs;
@@ -353,7 +342,6 @@
   // ==============================
   async function handleStartToggle() {
     try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
-    // If a previous SSE was stuck, close it so we can proceed
     forceCloseSSE("start_toggle");
 
     if (isRecording()) {
@@ -375,7 +363,7 @@
       mediaRecorder = new MediaRecorder(activeStream, mime ? { mimeType: mime } : undefined);
       mediaChunks = [];
       recordingStartedAt = performance.now();
-      lastSpeechTs = performance.now(); // seed so immediate auto-stop doesn't trigger
+      lastSpeechTs = performance.now();
 
       mediaRecorder.addEventListener("dataavailable", ({ data }) => {
         if (data?.size) mediaChunks.push(data);
@@ -419,7 +407,6 @@
     }
 
     try {
-      // Build base64 and POST (with timeout)
       const blob = await stopPromise;
       const audioBase64 = await blobToBase64(blob);
 
@@ -457,7 +444,7 @@
       audioPlaying = false;
       updateAudio(audioEl, null);
 
-      await openEventStream(); // robust; resolves reliably
+      await openEventStream();
       setStatus("done");
     } catch (err) {
       console.error(err);
@@ -494,13 +481,13 @@
   }
 
   // ==============================
-  // Networking — GET SSE (robust + listens for forced close)
+  // Networking — GET SSE
   // ==============================
   async function openEventStream() {
     sLog("Opening GET SSE:", STREAM_ROUTE);
 
-    const IDLE_TIMEOUT_MS = 20000;   // close if no events for 20s
-    const HARD_CLOSE_MS    = 120000; // absolute upper bound 2 min
+    const IDLE_TIMEOUT_MS = 20000;
+    const HARD_CLOSE_MS    = 120000;
 
     return new Promise((resolve, reject) => {
       const es = new EventSource(STREAM_ROUTE, { withCredentials: true });
@@ -529,15 +516,13 @@
 
       function bumpActivity() { lastActivity = Date.now(); }
 
-      // Resolve immediately if we force-close from elsewhere (e.g., Start/interrupt)
       const onForcedClose = () => end(true, "externally_closed");
       window.addEventListener(SSE_FORCE_EVENT, onForcedClose, { once: true });
 
-      // Watchdog timers (inactivity + hard close)
       const watchdog = setInterval(() => {
         const now = Date.now();
         if (now - lastActivity > IDLE_TIMEOUT_MS) {
-          setStatus("done"); // UI won’t look stuck
+          setStatus("done");
           end(true, "idle_timeout");
         } else if (now > hardCloseAt) {
           setStatus("done");
@@ -586,13 +571,11 @@
         if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
       });
 
-      // If your server can emit an explicit 'done' event, end immediately
       es.addEventListener("done", () => {
         setStatus("done");
         end(true, "server_done_event");
       });
 
-      // Server-sent error payloads / normal EOS via onerror
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
@@ -600,7 +583,6 @@
           setStatus("error");
           end(false, "server_error_event");
         } else {
-          // This also fires on normal close in some implementations
           if (sawAnyData) {
             setStatus("done");
             end(true, "onerror_after_data");
@@ -620,7 +602,6 @@
     if (interrupting) return;
     interrupting = true;
 
-    // Stop any TTS in progress and clear queue
     try {
       audioQueue.length = 0;
       if (!audioEl.paused) audioEl.pause();
@@ -628,13 +609,10 @@
       audioPlaying = false;
     } catch {}
 
-    // Close any live SSE stream (broadcast a forced-close so listeners resolve)
     forceCloseSSE("interrupt");
 
-    // UI nudge to show we're switching to user
     setStatusLabel("Listening…");
 
-    // If we were already recording, leave it; otherwise start recording
     if (!isRecording()) {
       if (voiceEnabled) pauseRecognitionForRecording();
       handleStartRecording().finally(() => {
@@ -645,7 +623,6 @@
     }
   }
 
-  // Allow other code paths to forcibly close a stuck stream (and notify listeners)
   function forceCloseSSE(reason = "client_close") {
     if (currentEventSource) {
       try { currentEventSource.close(); } catch {}
@@ -656,75 +633,217 @@
   }
 
   // ==============================
-  // Markdown support
+  // Markdown / Code / LaTeX support (fail-safe loaders)
   // ==============================
-  function loadScript(src) {
+  function loadCssOnce(href, key) {
+    if (document.querySelector(`link[data-key="${key}"]`)) return;
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    link.setAttribute("data-key", key);
+    document.head.appendChild(link);
+  }
+
+  function loadScriptOnce(src, key) {
     return new Promise((resolve, reject) => {
+      if (document.querySelector(`script[data-key="${key}"]`)) return resolve();
       const s = document.createElement("script");
       s.src = src;
       s.async = true;
+      s.setAttribute("data-key", key);
       s.onload = resolve;
       s.onerror = () => reject(new Error("Failed to load " + src));
       document.head.appendChild(s);
     });
   }
 
-  // Replace “smart” quotes/backticks (some models emit these) so fences parse
+  // Try a list of URLs; succeed on first one; never throw (return boolean)
+  async function loadScriptWithFallback(urls, key, timeoutMs = 8000) {
+    for (const url of urls) {
+      try {
+        await Promise.race([
+          loadScriptOnce(url, key),
+          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), timeoutMs))
+        ]);
+        sLog("Loaded:", url);
+        return true;
+      } catch (e) {
+        console.warn("CDN failed:", url, e?.message || e);
+      }
+    }
+    console.error("All CDNs failed for", key);
+    return false;
+  }
+
+  // Replace “smart” quotes/backticks so code fences parse reliably
   function normalizeFences(md) {
     return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
 
   async function ensureMarkdown() {
     if (MD_READY) return;
+
+    // Marked
     if (!window.marked) {
-      await loadScript("https://cdn.jsdelivr.net/npm/marked/marked.min.js");
+      await loadScriptWithFallback(
+        [
+          "https://cdn.jsdelivr.net/npm/marked/marked.min.js",
+          "https://unpkg.com/marked@latest/marked.min.js",
+          "https://cdnjs.cloudflare.com/ajax/libs/marked/14.1.2/marked.min.js"
+        ],
+        "marked"
+      );
     }
+
+    // DOMPurify
     if (!window.DOMPurify) {
-      await loadScript("https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js");
+      await loadScriptWithFallback(
+        [
+          "https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js",
+          "https://unpkg.com/dompurify@3.0.6/dist/purify.min.js",
+          "https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"
+        ],
+        "dompurify"
+      );
     }
+
     if (window.marked) {
-      marked.setOptions({
-        breaks: true,
-        gfm: true,
-        mangle: false,
-        headerIds: true
-      });
+      try {
+        marked.setOptions({
+          breaks: true,
+          gfm: true,
+          mangle: false,
+          headerIds: true
+        });
+      } catch {}
     }
-    MD_READY = true;
+
+    MD_READY = true; // even if CDN failed, we won't crash; rendering will fallback to plain text
   }
 
   async function ensureHighlighting() {
     if (HL_READY) return;
-    if (!window.hljs) {
-      await loadScript("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js");
-      const link = document.createElement("link");
-      link.rel = "stylesheet";
-      // Pick any theme you like:
-      link.href = "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css";
-      document.head.appendChild(link);
+
+    // CSS theme (doesn't matter if this fails)
+    loadCssOnce("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css", "hljs-theme")
+      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css", "hljs-theme2");
+
+    // IMPORTANT: use the browser UMD build
+    const ok = window.hljs || await loadScriptWithFallback(
+      [
+        "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js",
+        "https://unpkg.com/highlight.js@11.9.0/build/highlight.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+      ],
+      "hljs"
+    );
+
+    HL_READY = !!window.hljs; // do not throw if false
+  }
+
+  async function ensureKatex() {
+    if (KATEX_READY && window.katex && window.renderMathInElement) return;
+
+    // CSS first
+    loadCssOnce("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", "katex-css")
+      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css", "katex-css2");
+
+    // JS core
+    if (!window.katex) {
+      await loadScriptWithFallback(
+        [
+          "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js",
+          "https://unpkg.com/katex@0.16.11/dist/katex.min.js",
+          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"
+        ],
+        "katex"
+      );
     }
-    HL_READY = true;
+    // Auto-render
+    if (!window.renderMathInElement) {
+      await loadScriptWithFallback(
+        [
+          "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js",
+          "https://unpkg.com/katex@0.16.11/dist/contrib/auto-render.min.js",
+          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"
+        ],
+        "katex-auto"
+      );
+    }
+
+    KATEX_READY = !!(window.katex && window.renderMathInElement);
+  }
+
+  // Swap <pre> → <div> so KaTeX/HTML can render inside
+  function ensureRenderableContainer(el) {
+    if (el && el.tagName === "PRE") {
+      const div = document.createElement("div");
+      div.id = el.id;
+      div.className = el.className;
+      for (const { name, value } of Array.from(el.attributes)) {
+        if (name.startsWith("data-")) div.setAttribute(name, value);
+      }
+      el.replaceWith(div);
+      if (el === transcriptEl) transcriptEl = div;
+      if (el === answerEl)     answerEl = div;
+      return div;
+    }
+    return el;
   }
 
   async function renderMarkdown(el, mdText) {
+    el = ensureRenderableContainer(el);
+
     await ensureMarkdown();
-    const html = DOMPurify.sanitize(marked.parse(normalizeFences(mdText)));
 
-    // If the container is a <pre>, wrap real HTML inside a div to avoid nested <pre> quirks
-    const needsWrapper = el.tagName === "PRE";
-    const rendered = needsWrapper ? `<div class="md-root">${html}</div>` : html;
+    const src = normalizeFences(mdText);
+    if (window.marked && window.DOMPurify) {
+      try {
+        const html = DOMPurify.sanitize(marked.parse(src));
+        el.style.whiteSpace = "normal";
+        el.style.fontFamily = "inherit";
+        el.innerHTML = html;
+      } catch (e) {
+        console.warn("Markdown render failed, falling back to text:", e);
+        el.textContent = src;
+      }
+    } else {
+      // Fallback: no libs → just show plain text
+      el.textContent = src;
+    }
 
-    // Make the container behave like a normal block
-    el.style.whiteSpace = "normal";
-    el.style.fontFamily = "inherit";
-    el.innerHTML = rendered;
+    // Syntax highlighting (best-effort)
+    try {
+      await ensureHighlighting();
+      if (window.hljs) {
+        el.querySelectorAll("pre code").forEach(block => {
+          try { window.hljs.highlightElement(block); } catch {}
+        });
+      }
+    } catch (e) {
+      console.warn("Highlighting failed:", e);
+    }
 
-    // Syntax highlighting
-    await ensureHighlighting();
-    const scope = needsWrapper ? el.querySelector(".md-root") : el;
-    scope.querySelectorAll("pre code").forEach(block => {
-      try { hljs.highlightElement(block); } catch {}
-    });
+    // LaTeX (KaTeX) rendering (best-effort)
+    try {
+      await ensureKatex();
+      if (window.renderMathInElement && window.katex) {
+        window.renderMathInElement(el, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "\\[", right: "\\]", display: true },
+            { left: "$",  right: "$",  display: false },
+            { left: "\\(", right: "\\)", display: false },
+          ],
+          throwOnError: false,
+          strict: "warn",
+          trust: false,
+          macros: { "\\RR": "\\mathbb{R}", "\\NN": "\\mathbb{N}", "\\ZZ": "\\mathbb{Z}" }
+        });
+      }
+    } catch (e) {
+      console.warn("KaTeX render failed:", e);
+    }
   }
 
   // Throttle streaming paints
@@ -782,6 +901,8 @@
   }
 
   async function updateCardBody(element, value) {
+    element = ensureRenderableContainer(element);
+
     const text = typeof value === "string" ? value.trim() : "";
     const isTranscript = element.id === "transcript";
     const placeholder = isTranscript ? "Waiting for transcript..." : "Waiting for answer...";
@@ -806,7 +927,7 @@
     const buffer = await blob.arrayBuffer();
     let binary = "";
     const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000; // 32KB
+    const chunkSize = 0x8000;
     for (let i = 0; i < bytes.length; i += chunkSize) {
       binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
     }
