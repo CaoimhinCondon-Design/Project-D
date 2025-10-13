@@ -7,7 +7,7 @@
 
   // Voice detection config
   const FORCE_VAD = false;            // Set true to skip Web Speech and always use VAD
-  const VAD_THRESH = 0.02;            // Voice activity RMS threshold (raise if too sensitive)
+  const VAD_THRESH = 0.08;            // Voice activity RMS threshold (raise if too sensitive)
   const VAD_HANG_MS = 400;            // Hangover to avoid flapping during short pauses
   const AUTO_STOP_SILENCE_MS = 1200;  // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;       // Don't auto-stop before at least this much audio is captured
