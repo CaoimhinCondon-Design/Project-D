@@ -217,6 +217,7 @@ app.post("/api/message", async (req, res) => {
 let transcript = "" //TODO get rid of this
 
 app.post("/api/message/stream", async (req, res) => {
+  currentConvoIndex = 0;
   try {
     const { audioBase64 } = req.body;
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
