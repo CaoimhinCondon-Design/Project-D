@@ -25,6 +25,8 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
+  /* leave room for the fixed audio dock */
+  padding-bottom: 6rem;
 }
 
 .hero {
@@ -201,13 +203,64 @@ body {
   background: rgba(148, 163, 184, 0.25);
 }
 
+/* legacy in-layout audio card support (safe to keep) */
 .audio-player audio {
   width: 100%;
 }
 
+/* ===========================
+   Bottom audio dock
+   =========================== */
+.audio-dock {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+
+  background: rgba(15, 23, 42, 0.75); /* slate-900 w/ transparency */
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  border-top: 1px solid rgba(148, 163, 184, 0.25);
+  padding: 10px 16px;
+}
+
+.audio-dock__inner {
+  max-width: min(48rem, 100%);
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.audio-dock__label {
+  color: #e5e7eb;            /* slate-200 */
+  font-size: 0.9rem;
+  white-space: nowrap;
+  user-select: none;
+  opacity: 0.9;
+}
+
+/* The “pill” that sits behind the native controls */
+.audio-dock audio {
+  width: 100%;
+  max-width: 100%;
+  display: block;
+  border-radius: 12px;
+  background: rgba(2, 6, 23, 0.35);  /* ← tweak here: pill background */
+  box-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.6), inset 0 0 0 1px rgba(148, 163, 184, 0.15);
+  outline: none;
+  accent-color: #2563eb;            /* ← tweak here: progress/volume tint */
+}
+
+/* When hidden (JS toggles), keep layout tidy */
+.audio-dock audio[hidden] {
+  display: none !important;
+}
+
 @media (min-width: 40rem) {
   .app {
-    padding: 3.5rem 2.5rem 4rem;
+    padding: 3.5rem 2.5rem 6.5rem; /* extra bottom padding for dock */
   }
 
   .btn-group {
@@ -219,6 +272,7 @@ body {
   }
 }
 
+/* Dark mode */
 @media (prefers-color-scheme: dark) {
   :root {
     color: #e2e8f0;
@@ -250,18 +304,69 @@ body {
   .card__body[data-empty="true"] {
     color: #64748b;
   }
+
+  .audio-dock {
+    background: rgba(2, 6, 23, 0.7);
+    border-top-color: rgba(148, 163, 184, 0.2);
+  }
+
+  .audio-dock__label {
+    color: #f1f5f9;
+  }
+
+  .audio-dock audio {
+    background: rgba(10, 27, 104, 0.45);
+    box-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(148, 163, 184, 0.15);
+    accent-color: #60a5fa;
+  }
 }
 
 @keyframes pulse {
-  0% {
-    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45);
-  }
+  0% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.45); }
+  70% { box-shadow: 0 0 0 10px rgba(37, 99, 235, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0); }
+}
 
-  70% {
-    box-shadow: 0 0 0 10px rgba(37, 99, 235, 0);
-  }
+/* ===========================
+   Chromium control theming
+   =========================== */
+/* The enclosure is the rounded container Chrome uses around controls */
+.audio-dock audio::-webkit-media-controls-enclosure {
+  border-radius: 12px;
+  background-color: rgba(15, 23, 42, 0.85); /* overall pill color (Chromium) */
+  overflow: hidden; /* keep rounded corners */
+}
 
-  100% {
-    box-shadow: 0 0 0 0 rgba(37, 99, 235, 0);
+/* Panel background inside the enclosure (keep transparent to use enclosure color) */
+.audio-dock audio::-webkit-media-controls-panel {
+  background-color: transparent;
+}
+
+/* Make play/mute icons legible on dark background */
+.audio-dock audio::-webkit-media-controls-play-button,
+.audio-dock audio::-webkit-media-controls-mute-button {
+  filter: invert(1) saturate(0.8);
+}
+
+/* Progress + volume sliders tint */
+.audio-dock audio::-webkit-media-controls-timeline,
+.audio-dock audio::-webkit-media-controls-volume-slider {
+  accent-color: #2563eb; /* same as pill tint */
+}
+
+/* Time text color */
+.audio-dock audio::-webkit-media-controls-current-time-display,
+.audio-dock audio::-webkit-media-controls-time-remaining-display {
+  color: #e5e7eb;
+}
+
+/* Dark-mode tweaks for Chromium */
+@media (prefers-color-scheme: dark) {
+  .audio-dock audio::-webkit-media-controls-enclosure {
+    background-color: rgba(2, 6, 23, 0.9);
+  }
+  .audio-dock audio::-webkit-media-controls-current-time-display,
+  .audio-dock audio::-webkit-media-controls-time-remaining-display {
+    color: #f8fafc;
   }
 }
