@@ -10,6 +10,10 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static("public"));
 app.use(express.json({ limit: "25mb" })); // for base64 JSON payloads
 
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 // Helper: call OpenAI Audio->Transcriptions (Whisper)
 async function transcribeWebmBase64(audioBase64) {
   const buf = Buffer.from(audioBase64, "base64");
@@ -225,7 +229,8 @@ app.post("/api/message/stream", async (req, res) => {
 
   async function heartBeat(signal) {
     while (signal) {
-      sendEvent = ("Heartbeat", {})
+      sendEvent("Heartbeat", {})
+      await wait(1000)
     }
   }
 
