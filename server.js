@@ -129,6 +129,7 @@ CONTEXT
 The model summarizes another AI’s response paragraph by paragraph.
 Each summary should read smoothly when placed beside others, as if continuing one coherent thought.
 If a paragraph is a title, header, or introductory line (e.g. “Overview of Topic X”), return a minimal 3–4 word placeholder instead of summarizing it.
+If there is no content worth sumerizing on this line simply return the character \'無\' ie if a paragraph is just $$ ect
 
 OUTPUT
 Return only the short spoken-style summary text.
@@ -160,6 +161,9 @@ async function summarizeForSpeech(text, signal) {
   const j = await r.json();
   const output = j.choices?.[0]?.message?.content?.trim() ?? "";
   convo.push({ role: "assistant", content: output})
+    if (output.trim() === "無"){
+    return ""
+  }
   return output;
 }
 
@@ -263,7 +267,7 @@ app.get("/api/message/stream", async (req, res) => {
     while (currentConvoIndex !== index){await wait(1000)
       //console.log(currentConvoIndex + " ==? " + index)
     }
-    //if (streamClosed) return;
+    if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
     const shortSummary = await summarizeForSpeech(paragraph, signal);
     currentConvoIndex++
@@ -297,7 +301,7 @@ app.get("/api/message/stream", async (req, res) => {
       signal,
       onToken: async ({ token, text, done }) => {
         //console.log("running onToken");
-        //if (streamClosed) return;
+        if (streamClosed) return;
         //console.log("still running");
         paragraphs = text.split(/\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
