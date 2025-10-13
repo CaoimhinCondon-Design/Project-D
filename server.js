@@ -250,7 +250,6 @@ app.post("/api/message/stream", async (req, res) => {
   req.on("close", () => {
     console.log("req closed: StreamClosed")
     streamClosed = true;
-    console.log("req closed:: StreamClosed")
     controller.abort();
     res.end();
   });
