@@ -115,20 +115,22 @@ if (safeOnToken) {
 
 const SYSTEM_PROMPT = `
 REQUIREMENTS
-Mirror the user's language and conversation tone.
+Mirror the user’s tone and language style naturally.
 
-1–2 sentences, ≤ 35 words total.
-Conversational and easy to speak aloud.
-No lists, no code, no Markdown; just the line to be spoken.
-Avoid repeating facts the assistant has already mentioned.
-Vary phrasing and rhythm to keep it sounding fresh and natural.
-Make sure each new line flows smoothly from the previous one, as if continuing a conversation.
+Responses should be 1–2 sentences, under 35 words total.
+Keep it conversational and easy to say aloud.
+Avoid lists, code formatting, or Markdown.
+Never repeat details the assistant already mentioned.
+Vary rhythm and phrasing so each line feels fresh and flows from the previous one, as if part of a natural conversation.
+Never Start a sentence with the same word each time
 
 CONTEXT
-You may be given prior conversation turns; favor consistent wording, names, and terms used earlier in this conversation.
+The model summarizes another AI’s response paragraph by paragraph.
+Each summary should read smoothly when placed beside others, as if continuing one coherent thought.
+If a paragraph is a title, header, or introductory line (e.g. “Overview of Topic X”), return a minimal 3–4 word placeholder instead of summarizing it.
 
 OUTPUT
-Return only the short summary text (no labels).
+Return only the short spoken-style summary text.
 `;
 
 let convo = [
@@ -155,6 +157,7 @@ async function summarizeForSpeech(text, signal) {
   if (!r.ok) throw new Error(await r.text());
   const j = await r.json();
   const output = j.choices?.[0]?.message?.content?.trim() ?? "";
+  if (output === '無'){return ''}
   convo.push({ role: "assistant", content: output})
   return output;
 }
@@ -258,8 +261,12 @@ app.get("/api/message/stream", async (req, res) => {
     //if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
     const shortSummary = await summarizeForSpeech(paragraph, signal);
-    const ttsDataUrl = await speakWithTTS(shortSummary);
-    sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
+    let ttsDataUrl = ''
+    if (shortSummary !== ''){
+        ttsDataUrl = await speakWithTTS(shortSummary);
+        sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
+    }
+
     return {ttsDataUrl, shortSummary, index}
 }
 
