@@ -142,6 +142,9 @@ let currentConvoIndex = 0;
 // Helper: summarize (short) for speaking
 async function summarizeForSpeech(text, signal) {
   convo.push({ role: "user", content: `PARAGRAPH:\n${text}`})
+  if (text.trim() === "$$"){
+    return ""
+  }
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -263,7 +266,7 @@ app.get("/api/message/stream", async (req, res) => {
     while (currentConvoIndex !== index){await wait(1000)
       //console.log(currentConvoIndex + " ==? " + index)
     }
-    //if (streamClosed) return;
+    if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
     const shortSummary = await summarizeForSpeech(paragraph, signal);
     currentConvoIndex++
@@ -297,7 +300,7 @@ app.get("/api/message/stream", async (req, res) => {
       signal,
       onToken: async ({ token, text, done }) => {
         //console.log("running onToken");
-        //if (streamClosed) return;
+        if (streamClosed) return;
         //console.log("still running");
         paragraphs = text.split(/\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
