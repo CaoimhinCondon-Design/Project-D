@@ -129,6 +129,7 @@ CONTEXT
 The model summarizes another AI’s response paragraph by paragraph.
 Each summary should read smoothly when placed beside others, as if continuing one coherent thought.
 If a paragraph is a title, header, or introductory line (e.g. “Overview of Topic X”), return a minimal 3–4 word placeholder instead of summarizing it.
+If there is no content worth sumerizing on this line simply return the character \'無\' ie if a paragraph is just $$ ect
 
 OUTPUT
 Return only the short spoken-style summary text.
@@ -142,9 +143,6 @@ let currentConvoIndex = 0;
 // Helper: summarize (short) for speaking
 async function summarizeForSpeech(text, signal) {
   convo.push({ role: "user", content: `PARAGRAPH:\n${text}`})
-  if (text.trim() === "$$"){
-    return ""
-  }
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -163,6 +161,9 @@ async function summarizeForSpeech(text, signal) {
   const j = await r.json();
   const output = j.choices?.[0]?.message?.content?.trim() ?? "";
   convo.push({ role: "assistant", content: output})
+    if (output.trim() === "無"){
+    return ""
+  }
   return output;
 }
 
