@@ -315,7 +315,7 @@ body {
   }
 
   .audio-dock audio {
-    background: rgba(10, 27, 104, 0.45);
+    background: rgba(3, 13, 59, 0.45);
     box-shadow: 0 8px 28px -12px rgba(0, 0, 0, 0.7), inset 0 0 0 1px rgba(148, 163, 184, 0.15);
     accent-color: #60a5fa;
   }
@@ -363,7 +363,7 @@ body {
 /* Dark-mode tweaks for Chromium */
 @media (prefers-color-scheme: dark) {
   .audio-dock audio::-webkit-media-controls-enclosure {
-    background-color: rgba(2, 6, 23, 0.9);
+    background-color: rgba(3, 13, 59, 0.45);
   }
   .audio-dock audio::-webkit-media-controls-current-time-display,
   .audio-dock audio::-webkit-media-controls-time-remaining-display {
