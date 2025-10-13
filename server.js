@@ -119,7 +119,7 @@ Mirror the user’s tone and language style naturally.
 
 Responses should be 1–2 sentences, under 35 words total.
 Keep it conversational and easy to say aloud.
-Avoid lists, code formatting, or Markdown.
+Avoid lists, code formatting, or Markdown. DO NOT USE LATEX. Everything should be formated so it can be read verbatim by tts.
 Never repeat details the assistant already mentioned.
 Vary rhythm and phrasing so each line feels fresh and flows from the previous one, as if part of a natural conversation.
 Never Start a sentence with the same word each time
@@ -324,7 +324,7 @@ app.get("/api/message/stream", async (req, res) => {
       }
     });
 
-    // sendEvent("done", {
+    sendEvent("done", {})
     //   transcript,
     //   answer: streamedAnswer,
     //   shortSummary,
