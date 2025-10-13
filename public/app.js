@@ -350,6 +350,9 @@
   // ==============================
   async function handleStartToggle() {
     try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
+    // If a previous SSE was stuck, close it so we can proceed
+    forceCloseSSE("start_toggle");
+
     if (isRecording()) {
       await cancelRecording();
       return;
@@ -413,24 +416,34 @@
     }
 
     try {
-      // Build base64 and POST
+      // Build base64 and POST (with timeout)
       const blob = await stopPromise;
       const audioBase64 = await blobToBase64(blob);
 
-      const postRes = await fetch(STREAM_ROUTE, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Accept: "application/json",
-          "Cache-Control": "no-cache",
-        },
-        credentials: "same-origin",
-        body: JSON.stringify({ audioBase64 }),
-      });
+      const POST_TIMEOUT_MS = 30000;
+      const ctrl = new AbortController();
+      const postTimer = setTimeout(() => ctrl.abort("post_timeout"), POST_TIMEOUT_MS);
 
-      if (!postRes.ok) {
-        const msg = await postRes.text().catch(() => "");
-        throw new Error(`POST ${STREAM_ROUTE} failed: ${postRes.status} ${msg}`);
+      let postRes;
+      try {
+        postRes = await fetch(STREAM_ROUTE, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Accept: "application/json",
+            "Cache-Control": "no-cache",
+          },
+          credentials: "same-origin",
+          body: JSON.stringify({ audioBase64 }),
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(postTimer);
+      }
+
+      if (!postRes?.ok) {
+        const msg = (await postRes?.text()?.catch(() => "")) || "";
+        throw new Error(`POST ${STREAM_ROUTE} failed: ${postRes?.status} ${msg}`);
       }
 
       const { transcript } = await postRes.json();
@@ -441,7 +454,7 @@
       audioPlaying = false;
       updateAudio(audioEl, null);
 
-      await openEventStream();
+      await openEventStream(); // robust; always resolves (watchdogs)
       setStatus("done");
     } catch (err) {
       console.error(err);
@@ -478,46 +491,71 @@
   }
 
   // ==============================
-  // Networking — GET SSE
+  // Networking — GET SSE (robust)
   // ==============================
   async function openEventStream() {
     sLog("Opening GET SSE:", STREAM_ROUTE);
 
-    await new Promise((resolve, reject) => {
+    const IDLE_TIMEOUT_MS = 20000;   // close if no events for 20s
+    const HARD_CLOSE_MS    = 120000; // absolute upper bound 2 min
+
+    return new Promise((resolve, reject) => {
       const es = new EventSource(STREAM_ROUTE, { withCredentials: true });
       currentEventSource = es;
+
+      let lastActivity = Date.now();
+      let hardCloseAt  = Date.now() + HARD_CLOSE_MS;
       let lastAnswerText = "";
       let sawAnyData = false;
+      let resolved = false;
 
-      const end = (ok) => {
+      function clearAll() {
+        try { clearInterval(watchdog); } catch {}
+      }
+
+      function end(ok, why = "") {
+        if (resolved) return;
+        resolved = true;
+        clearAll();
         try { es.close(); } catch {}
         if (currentEventSource === es) currentEventSource = null;
-        ok ? resolve() : reject(new Error("SSE error"));
-      };
+        sLog(`SSE ended ok=${ok} ${why ? "(" + why + ")" : ""}`);
+        ok ? resolve() : reject(new Error("SSE error: " + why));
+      }
+
+      function bumpActivity() { lastActivity = Date.now(); }
+
+      // Watchdog timers (inactivity + hard close)
+      const watchdog = setInterval(() => {
+        const now = Date.now();
+        if (now - lastActivity > IDLE_TIMEOUT_MS) {
+          setStatus("done"); // UI won’t look stuck
+          end(true, "idle_timeout");
+        } else if (now > hardCloseAt) {
+          setStatus("done");
+          end(true, "hard_close");
+        }
+      }, 1000);
 
       const handleStatus = (data) => {
+        bumpActivity();
         const stage = data?.stage ? ` (${data.stage})` : "";
         setStatusLabel(`Processing${stage}`);
       };
 
-      es.addEventListener("status", (e) => {
-        sawAnyData = true;
-        handleStatus(safeParse(e.data));
-      });
+      es.addEventListener("open", () => { bumpActivity(); });
 
-      es.addEventListener("subStatus", (e) => {
-        sawAnyData = true;
-        handleStatus(safeParse(e.data));
-      });
+      es.addEventListener("status", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
+      es.addEventListener("subStatus", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
 
       es.addEventListener("transcript", (e) => {
-        sawAnyData = true;
+        bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
         if (data?.transcript) scheduleMarkdownUpdate(transcriptEl, data.transcript);
       });
 
       es.addEventListener("token", (e) => {
-        sawAnyData = true;
+        bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
         if (typeof data?.text === "string") {
           lastAnswerText = data.text;
@@ -528,41 +566,42 @@
       });
 
       es.addEventListener("answer", (e) => {
-        sawAnyData = true;
+        bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
         lastAnswerText = data?.answer || lastAnswerText;
         scheduleMarkdownUpdate(answerEl, lastAnswerText);
       });
 
       es.addEventListener("finishedParagraph", (e) => {
-        sawAnyData = true;
+        bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl); // data:audio/mpeg;base64,...
+        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
       });
 
-      // Server heartbeat
-      es.addEventListener("Heartbeat", () => {});
+      // If your server can emit an explicit 'done' event, end immediately
+      es.addEventListener("done", () => {
+        setStatus("done");
+        end(true, "server_done_event");
+      });
 
-      // Server error payloads (e.g., { message: "no_transcript_available" })
+      // Server-sent error payloads
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
           scheduleMarkdownUpdate(answerEl, `**Error:** ${payload.message}`);
           setStatus("error");
-          end(false);
+          end(false, "server_error_event");
+        } else {
+          // This also fires on normal close in some implementations
+          if (sawAnyData) {
+            setStatus("done");
+            end(true, "onerror_after_data");
+          } else {
+            setStatus("error");
+            end(false, "onerror_no_data");
+          }
         }
       });
-
-      // Connection close: EventSource sets onerror when the stream ends.
-      es.onerror = () => {
-        if (sawAnyData) {
-          setStatus("done");
-          end(true);
-        } else {
-          setStatus("error");
-          end(false);
-        }
-      };
     });
   }
 
@@ -582,10 +621,7 @@
     } catch {}
 
     // Close any live SSE stream
-    if (currentEventSource) {
-      try { currentEventSource.close(); } catch {}
-      currentEventSource = null;
-    }
+    forceCloseSSE("interrupt");
 
     // UI nudge to show we're switching to user
     setStatusLabel("Listening…");
@@ -598,6 +634,15 @@
       });
     } else {
       interrupting = false;
+    }
+  }
+
+  // Allow other code paths to forcibly close a stuck stream
+  function forceCloseSSE(reason = "client_close") {
+    if (currentEventSource) {
+      try { currentEventSource.close(); } catch {}
+      currentEventSource = null;
+      sLog("SSE: force-closed (" + reason + ")");
     }
   }
 
