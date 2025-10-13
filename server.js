@@ -136,10 +136,11 @@ Return only the short spoken-style summary text.
 let convo = [
   { role: "system", content: SYSTEM_PROMPT },
 ]
+let currentConvoIndex = 0;
 
 // Helper: summarize (short) for speaking
 async function summarizeForSpeech(text, signal) {
-  convo.push({ role: "function", name: "summarizeParagraph", content: text })
+  convo.push({ role: "user", content: `PARAGRAPH:\n${text}`})
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -157,7 +158,6 @@ async function summarizeForSpeech(text, signal) {
   if (!r.ok) throw new Error(await r.text());
   const j = await r.json();
   const output = j.choices?.[0]?.message?.content?.trim() ?? "";
-  if (output === '無'){return ''}
   convo.push({ role: "assistant", content: output})
   return output;
 }
@@ -253,20 +253,23 @@ app.get("/api/message/stream", async (req, res) => {
   async function heartBeat(signal) {
     while (signal) {
       sendEvent("Heartbeat", {})
-      await wait(1000)
+      await wait(10000)
     }
   }
 
   async function workflow(paragraph, index, signal){
+    while (currentConvoIndex !== index){await wait(1000)
+      //console.log(currentConvoIndex + " ==? " + index)
+    }
     //if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
     const shortSummary = await summarizeForSpeech(paragraph, signal);
+    currentConvoIndex++
     let ttsDataUrl = ''
     if (shortSummary !== ''){
         ttsDataUrl = await speakWithTTS(shortSummary);
         sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
     }
-
     return {ttsDataUrl, shortSummary, index}
 }
 
@@ -287,6 +290,7 @@ app.get("/api/message/stream", async (req, res) => {
     let paragraphs = [];
     let workloadPromises = {};
     let currentIndex = 0;
+    let paragraphIndex = 0;
     await streamAnswer(transcript, {
       signal,
       onToken: async ({ token, text, done }) => {
@@ -297,7 +301,8 @@ app.get("/api/message/stream", async (req, res) => {
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
           const p = paragraphs[currentIndex].trim();
           if (p) {
-            workloadPromises[currentIndex] = workflow(p, currentIndex);
+            workloadPromises[currentIndex] = workflow(p, paragraphIndex);
+            paragraphIndex++;
           }
           currentIndex++;
         }
