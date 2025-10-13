@@ -114,23 +114,31 @@ if (safeOnToken) {
   return fullText.trim();
 }
 
-// Helper: summarize (short) for speaking
-async function summarizeForSpeech(text, signal) {
-  const SYSTEM_PROMPT = `
-You produce a brief, natural, spoken-style summary of ONE paragraph at a time.
-
+const SYSTEM_PROMPT = `
 REQUIREMENTS
-- Mirror the user's language and the conversation tone.
-- 1–2 sentences, ≤ 35 words total.
-- Conversational and easy to speak aloud.
-- No lists, no code, no Markdown; just the line to be spoken.
+Mirror the user's language and conversation tone.
+
+1–2 sentences, ≤ 35 words total.
+Conversational and easy to speak aloud.
+No lists, no code, no Markdown; just the line to be spoken.
+Avoid repeating facts the assistant has already mentioned.
+Vary phrasing and rhythm to keep it sounding fresh and natural.
+Make sure each new line flows smoothly from the previous one, as if continuing a conversation.
 
 CONTEXT
-- You may be given prior conversation turns; favor consistent wording, names, and terms used earlier in this conversation.
+You may be given prior conversation turns; favor consistent wording, names, and terms used earlier in this conversation.
 
 OUTPUT
-- Return only the short summary text (no labels).
+Return only the short summary text (no labels).
 `;
+
+let convo = [
+  { role: "system", content: SYSTEM_PROMPT },
+]
+
+// Helper: summarize (short) for speaking
+async function summarizeForSpeech(text, signal) {
+  convo.push({ role: "function", name: "summarizeParagraph", content: text })
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -142,15 +150,14 @@ OUTPUT
     body: JSON.stringify({
       model: "gpt-4o-mini",
       temperature: 0.3,
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: text }
-      ]
+      messages: convo
     })
   });
   if (!r.ok) throw new Error(await r.text());
   const j = await r.json();
-  return j.choices?.[0]?.message?.content?.trim() ?? "";
+  const output = j.choices?.[0]?.message?.content?.trim() ?? "";
+  convo.push({ role: "assistant", content: output})
+  return output;
 }
 
 // Helper: speak summary using OpenAI Audio->Speech (HTTP, simple)
@@ -214,6 +221,7 @@ app.post("/api/message/stream", async (req, res) => {
 
     // 1) STT (Whisper)
     transcript = await transcribeWebmBase64(audioBase64);
+    convo.push({ role: "user", content: transcript })
 
     res.json({transcript});
   } catch (e) {
