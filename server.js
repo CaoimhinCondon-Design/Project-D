@@ -182,7 +182,7 @@ app.post("/api/message/stream", async (req, res) => {
     if (trimedEvent == "status" && payload.stage){
       info = payload.stage
     }
-    console.log("Sent Event: " + event + " " + info)
+    //console.log("Sent Event: " + event + " " + info)
     res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
@@ -199,6 +199,7 @@ app.post("/api/message/stream", async (req, res) => {
   const { signal } = controller;
   let streamClosed = false;
   req.on("close", () => {
+    console.log("req closed: StreamClosed")
     streamClosed = true;
     controller.abort();
     res.end();
@@ -239,7 +240,7 @@ app.post("/api/message/stream", async (req, res) => {
           const results = await Promise.allSettled(Object.values(workloadPromises));
           console.log("\n\n\n\n\n\n results \n\n")
           for (const result of results) {
-            console.log(result)
+            //console.log(result)
           }
         } else if (token) {
           sendEvent("token", { token, text });
