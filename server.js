@@ -72,7 +72,6 @@ CONTENT
 - If unsafe, refuse briefly and suggest a safe alternative.
 `;
 
-
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
   let fullText = "";
