@@ -52,6 +52,23 @@ async function completeAnswer(prompt) {
 
 // Helper: call GPT for reasoning with streamed tokens
 async function streamAnswer(prompt, { onToken, signal } = {}) {
+const SYSTEM_PROMPT = `
+You are a helpful assistant that writes in full Markdown.
+
+STYLE
+- Use headings, bullet lists, tables, links when helpful.
+- Use code fences for code: \`\`\`lang ...\`\`\`, preceded by a 1–2 line explanation.
+- Use LaTeX: inline ($x^2$) and display ($$...$$).
+- Write in short paragraphs separated by a BLANK LINE.
+- When you finish a paragraph, END IT CLEANLY and then insert ONE blank line, so it’s clearly separable in a stream.
+
+CONTENT
+- Give final answers and brief justifications; do not reveal hidden chain-of-thought.
+- Mirror the user’s language.
+- If unsafe, refuse briefly and suggest a safe alternative.
+`;
+
+
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
   let fullText = "";
@@ -62,13 +79,16 @@ async function streamAnswer(prompt, { onToken, signal } = {}) {
     input: [
         {
             role: "system",
-            content: "You are concise and helpful.",
+            content: SYSTEM_PROMPT,
+        },
+        {
             role: "user",
             content: prompt,
         },
     ],
     temperature: 0.2,
     stream: true,
+    signal,
 });
 
 for await (const event of stream) {
@@ -92,7 +112,23 @@ if (safeOnToken) {
 }
 
 // Helper: summarize (short) for speaking
-async function summarizeForSpeech(text) {
+async function summarizeForSpeech(text, signal) {
+  const SYSTEM_PROMPT = `
+You produce a brief, natural, spoken-style summary of ONE paragraph at a time.
+
+REQUIREMENTS
+- Mirror the user's language and the conversation tone.
+- 1–2 sentences, ≤ 35 words total.
+- Conversational and easy to speak aloud.
+- No lists, no code, no Markdown; just the line to be spoken.
+
+CONTEXT
+- You may be given prior conversation turns; favor consistent wording, names, and terms used earlier in this conversation.
+
+OUTPUT
+- Return only the short summary text (no labels).
+`;
+
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -102,8 +138,9 @@ async function summarizeForSpeech(text) {
     body: JSON.stringify({
       model: "gpt-4o-mini",
       temperature: 0.3,
+      signal,
       messages: [
-        { role: "system", content: "Summarize in <= 2 short sentences for speaking." },
+        { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: text }
       ]
     })
@@ -186,10 +223,16 @@ app.post("/api/message/stream", async (req, res) => {
     res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
-  async function workflow(paragraph, index){
+  async function heartBeat(signal) {
+    while (signal) {
+      sendEvent = ("Heartbeat", {})
+    }
+  }
+
+  async function workflow(paragraph, index, signal){
     //if (streamClosed) return;
     sendEvent("subStatus", { stage: `working on paragraph ${index}` });
-    const shortSummary = await summarizeForSpeech(paragraph);
+    const shortSummary = await summarizeForSpeech(paragraph, signal);
     const ttsDataUrl = await speakWithTTS(shortSummary);
     sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
     return {ttsDataUrl, shortSummary, index}
@@ -198,8 +241,10 @@ app.post("/api/message/stream", async (req, res) => {
   const controller = new AbortController();
   const { signal } = controller;
   let streamClosed = false;
+  heartBeat(signal)
   req.on("close", () => {
     streamClosed = true;
+    console.log("req closed:: StreamClosed")
     controller.abort();
     res.end();
   });
