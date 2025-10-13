@@ -92,8 +92,7 @@ CONTENT
     ],
     temperature: 0.2,
     stream: true,
-    signal,
-});
+},  { signal });
 
 for await (const event of stream) {
     if (event.type === 'response.output_text.delta'){
