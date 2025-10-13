@@ -203,13 +203,28 @@ app.post("/api/message", async (req, res) => {
 });
 
 /**
- * POST /api/message/stream
+ * get and POST /api/message/stream
  * Streams GPT tokens (SSE) while preserving the existing processing pipeline.
  */
+let transcript = "" //TODO get rid of this
+
 app.post("/api/message/stream", async (req, res) => {
+  try {
+    const { audioBase64 } = req.body;
+    if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
+
+    // 1) STT (Whisper)
+    transcript = await transcribeWebmBase64(audioBase64);
+
+    res.json({transcript});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "processing_failed" });
+  }
+})
+
+app.get("/api/message/stream", async (req, res) => {
   console.log("using stream post")
-  const { audioBase64 } = req.body;
-  if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
 
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
@@ -256,11 +271,6 @@ app.post("/api/message/stream", async (req, res) => {
   });
 
   try {
-    sendEvent("status", { stage: "transcribing" });
-    const transcript = await transcribeWebmBase64(audioBase64);
-    sendEvent("transcript", { transcript });
-    console.log(transcript)
-
     sendEvent("status", { stage: "reasoning" });
     let streamedAnswer = "";
     let paragraphs = [];
