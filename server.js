@@ -1,12 +1,18 @@
 import express from "express";
 import dotenv from "dotenv";
+import { OpenAI } from "openai";
 dotenv.config();
+const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 app.use(express.static("public"));
 app.use(express.json({ limit: "25mb" })); // for base64 JSON payloads
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // Helper: call OpenAI Audio->Transcriptions (Whisper)
 async function transcribeWebmBase64(audioBase64) {
@@ -50,124 +56,115 @@ async function completeAnswer(prompt) {
 
 // Helper: call GPT for reasoning with streamed tokens
 async function streamAnswer(prompt, { onToken, signal } = {}) {
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    signal,
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      stream: true,
-      messages: [
-        { role: "system", content: "You are concise and helpful." },
-        { role: "user", content: prompt }
-      ]
-    })
-  });
-  if (!r.ok) throw new Error(await r.text());
+const SYSTEM_PROMPT = `
+You are a helpful assistant that writes in full Markdown.
 
-  const reader = r.body?.getReader();
-  if (!reader) throw new Error("Streaming not supported in this runtime.");
+STYLE
+- Use headings, bullet lists, tables, links when helpful.
+- Use code fences for code: \`\`\`lang ...\`\`\`, preceded by a 1–2 line explanation.
+- Use LaTeX: inline ($x^2$) and display ($$...$$).
+- Write in short paragraphs separated by a BLANK LINE.
+- When you finish a paragraph, END IT CLEANLY and then insert ONE blank line, so it’s clearly separable in a stream.
 
-  const decoder = new TextDecoder("utf-8");
-  let buffer = "";
-  let fullText = "";
+CONTENT
+- Give final answers and brief justifications; do not reveal hidden chain-of-thought.
+- Mirror the user’s language.
+- If unsafe, refuse briefly and suggest a safe alternative.
+`;
+
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
+  let fullText = "";
+  let token;
 
-  const extractContent = (delta) => {
-    if (!delta) return "";
-    if (typeof delta.content === "string") return delta.content;
-    if (Array.isArray(delta.content)) {
-      return delta.content
-        .map((part) => {
-          if (!part) return "";
-          if (typeof part === "string") return part;
-          if (typeof part.text === "string") return part.text;
-          if (typeof part.content === "string") return part.content;
-          return "";
-        })
-        .join("");
-    }
-    return "";
-  };
+  const stream = await client.responses.create({
+    model: "gpt-4o-mini",
+    input: [
+        {
+            role: "system",
+            content: SYSTEM_PROMPT,
+        },
+        {
+            role: "user",
+            content: prompt,
+        },
+    ],
+    temperature: 0.2,
+    stream: true,
+},  { signal });
 
-  while (!streamClosed) {
-    const { value, done } = await reader.read();
-    if (value) {
-      buffer += decoder.decode(value, { stream: true });
-    }
-    if (done) {
-      buffer += decoder.decode(new Uint8Array(), { stream: false });
-      streamClosed = true;
-    }
-
-    buffer = buffer.replace(/\r\n/g, "\n");
-    let delimiterIndex;
-    while ((delimiterIndex = buffer.indexOf("\n\n")) !== -1) {
-      const rawEvent = buffer.slice(0, delimiterIndex);
-      buffer = buffer.slice(delimiterIndex + 2);
-
-      const dataLines = rawEvent
-        .split("\n")
-        .map((line) => line.trim())
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice(5).trim())
-        .filter(Boolean);
-
-      for (const dataLine of dataLines) {
-        if (dataLine === "[DONE]") {
-          streamClosed = true;
-          break;
-        }
-        let payload;
-        try {
-          payload = JSON.parse(dataLine);
-        } catch {
-          continue;
-        }
-        const delta = payload.choices?.[0]?.delta;
-        const token = extractContent(delta);
+for await (const event of stream) {
+    if (event.type === 'response.output_text.delta'){
+        token = event.delta;
         if (!token) continue;
         fullText += token;
         if (safeOnToken) {
           await safeOnToken({ token, text: fullText });
         }
-      }
-      if (streamClosed) break;
     }
-  }
+    if (streamClosed) break;
+}
 
-  if (safeOnToken) {
+if (safeOnToken) {
     await safeOnToken({ done: true, text: fullText });
   }
 
+  console.log(fullText)
   return fullText.trim();
 }
 
+const SYSTEM_PROMPT = `
+REQUIREMENTS
+Mirror the user’s tone and language style naturally.
+
+Responses should be 1–2 sentences, under 35 words total.
+Keep it conversational and easy to say aloud.
+Avoid lists, code formatting, or Markdown. DO NOT USE LATEX. Everything should be formated so it can be read verbatim by tts.
+Never repeat details the assistant already mentioned.
+Vary rhythm and phrasing so each line feels fresh and flows from the previous one, as if part of a natural conversation.
+Never Start a sentence with the same word each time
+If a summary is very short (under 12 words), randomly begin or include natural filler like \‘am\’, \‘uhh\’, or \‘hmm\’ to make it sound spontaneous.
+
+CONTEXT
+The model summarizes another AI’s response paragraph by paragraph.
+Each summary should read smoothly when placed beside others, as if continuing one coherent thought.
+If a paragraph is a title, header, or introductory line (e.g. “Overview of Topic X”), return a minimal 3–4 word placeholder instead of summarizing it.
+If there is no content worth sumerizing on this line simply return the character \'無\' ie if a paragraph is just $$ ect
+
+OUTPUT
+Return only the short spoken-style summary text.
+`;
+
+let convo = [
+  { role: "system", content: SYSTEM_PROMPT },
+]
+let currentConvoIndex = 0;
+
 // Helper: summarize (short) for speaking
-async function summarizeForSpeech(text) {
+async function summarizeForSpeech(text, signal) {
+  convo.push({ role: "user", content: `PARAGRAPH:\n${text}`})
+
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
+    signal,
     body: JSON.stringify({
       model: "gpt-4o-mini",
       temperature: 0.3,
-      messages: [
-        { role: "system", content: "Summarize in <= 2 short sentences for speaking." },
-        { role: "user", content: text }
-      ]
+      messages: convo
     })
   });
   if (!r.ok) throw new Error(await r.text());
   const j = await r.json();
-  return j.choices?.[0]?.message?.content?.trim() ?? "";
+  const output = j.choices?.[0]?.message?.content?.trim() ?? "";
+  convo.push({ role: "assistant", content: output})
+    if (output.trim() === "無"){
+    return ""
+  }
+  return output;
 }
 
 // Helper: speak summary using OpenAI Audio->Speech (HTTP, simple)
@@ -219,66 +216,127 @@ app.post("/api/message", async (req, res) => {
 });
 
 /**
- * POST /api/message/stream
+ * get and POST /api/message/stream
  * Streams GPT tokens (SSE) while preserving the existing processing pipeline.
  */
-app.post("/api/message/stream", async (req, res) => {
-  const { audioBase64 } = req.body;
-  if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
+let transcript = "" //TODO get rid of this
 
+app.post("/api/message/stream", async (req, res) => {
+  currentConvoIndex = 0;
+  try {
+    const { audioBase64 } = req.body;
+    if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
+
+    // 1) STT (Whisper)
+    transcript = await transcribeWebmBase64(audioBase64);
+    convo.push({ role: "user", content: transcript })
+
+    res.json({transcript});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "processing_failed" });
+  }
+})
+
+app.get("/api/message/stream", async (req, res) => {
   res.status(200);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // respected by nginx & some PaaS
   res.flushHeaders?.();
 
   const sendEvent = (event, payload) => {
-    res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
-  };
+    const trimedEvent = event.trim();
+    let info = ""
+    if (trimedEvent == "status" && payload.stage){
+      info = payload.stage
+    }
+    console.log("Sent Event: " + event + " " + info)
+    res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
+  }
+
+  async function heartBeat(signal) {
+    while (signal) {
+      sendEvent("Heartbeat", {})
+      await wait(10000)
+    }
+  }
+
+  async function workflow(paragraph, index, signal){
+    while (currentConvoIndex !== index){await wait(1000)
+      //console.log(currentConvoIndex + " ==? " + index)
+    }
+    if (streamClosed) return;
+    sendEvent("subStatus", { stage: `working on paragraph ${index}` });
+    const shortSummary = await summarizeForSpeech(paragraph, signal);
+    currentConvoIndex++
+    let ttsDataUrl = ''
+    if (shortSummary !== ''){
+        ttsDataUrl = await speakWithTTS(shortSummary);
+        sendEvent("finishedParagraph", {ttsDataUrl, shortSummary, index});
+    }
+    return {ttsDataUrl, shortSummary, index}
+}
 
   const controller = new AbortController();
   const { signal } = controller;
   let streamClosed = false;
+  heartBeat(signal)
   req.on("close", () => {
+    console.log("req closed: StreamClosed")
     streamClosed = true;
     controller.abort();
     res.end();
   });
 
   try {
-    sendEvent("status", { stage: "transcribing" });
-    const transcript = await transcribeWebmBase64(audioBase64);
-    sendEvent("transcript", { transcript });
-
     sendEvent("status", { stage: "reasoning" });
     let streamedAnswer = "";
+    let paragraphs = [];
+    let workloadPromises = {};
+    let currentIndex = 0;
+    let paragraphIndex = 0;
     await streamAnswer(transcript, {
       signal,
       onToken: async ({ token, text, done }) => {
+        //console.log("running onToken");
         if (streamClosed) return;
+        //console.log("still running");
+        paragraphs = text.split(/\n/);
+        while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
+          const p = paragraphs[currentIndex].trim();
+          if (p) {
+            workloadPromises[currentIndex] = workflow(p, paragraphIndex);
+            paragraphIndex++;
+          }
+          currentIndex++;
+        }
         if (done) {
+          const p = paragraphs.at(-1).trim();
+          if (p) {
+            workloadPromises[currentIndex] = workflow(p, currentIndex);
+          }
           streamedAnswer = text?.trim() ?? "";
           sendEvent("answer", { answer: streamedAnswer });
+          const results = await Promise.allSettled(Object.values(workloadPromises));
+          console.log("\n\n\n\n\n\n results \n\n")
+          for (const result of results) {
+            //console.log(result)
+          }
         } else if (token) {
           sendEvent("token", { token, text });
         }
       }
     });
 
-    sendEvent("status", { stage: "summarizing" });
-    const shortSummary = await summarizeForSpeech(streamedAnswer);
-    sendEvent("summary", { shortSummary });
+    sendEvent("done", {})
+    //   transcript,
+    //   answer: streamedAnswer,
+    //   shortSummary,
+    //   ttsDataUrl
+    // });
 
-    sendEvent("status", { stage: "speaking" });
-    const ttsDataUrl = await speakWithTTS(shortSummary);
-    sendEvent("speech", { ttsDataUrl });
-
-    sendEvent("done", {
-      transcript,
-      answer: streamedAnswer,
-      shortSummary,
-      ttsDataUrl
-    });
     if (!streamClosed) res.end();
   } catch (e) {
     if (!streamClosed) {
@@ -292,64 +350,3 @@ app.post("/api/message/stream", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`MVP running: http://localhost:${PORT}`);
 });
-
-/* ------------------------
-   OPTIONAL: Realtime version for speaking via gpt-realtime-mini
-   (collects audio from the Realtime WebSocket and returns a data URL)
-   This is a minimal sketch; check the Realtime docs for the event schema.
--------------------------*/
-
-import WebSocket from "ws";
-
-async function speakWithRealtime(summaryText) {
-  const model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-mini";
-  const voice = process.env.OPENAI_REALTIME_VOICE || "verse";
-
-  return await new Promise((resolve, reject) => {
-    const ws = new WebSocket(`wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}&voice=${encodeURIComponent(voice)}`, {
-      headers: {
-        "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
-        "OpenAI-Beta": "realtime=v1"
-      }
-    });
-
-    const audioChunks = []; // will collect base64 audio frames
-    ws.on("open", () => {
-      // Ask the model to speak our summary
-      ws.send(JSON.stringify({
-        type: "response.create",
-        response: {
-          instructions: "Speak the following summary clearly and naturally.",
-          modalities: ["audio"],
-          input_text: summaryText
-        }
-      }));
-    });
-
-    ws.on("message", (msg) => {
-      try {
-        const evt = JSON.parse(msg.toString());
-        // Depending on the snapshot, audio can come as delta chunks:
-        // e.g., evt.type === "response.output_audio.delta" with evt.delta (base64)
-        if (evt.type === "response.output_audio.delta" && evt.delta) {
-          audioChunks.push(evt.delta);
-        }
-        if (evt.type === "response.completed") {
-          ws.close();
-          // Join base64 chunks; Realtime typically streams PCM/Opus depending on settings.
-          const b64 = audioChunks.join("");
-          // Many snapshots stream raw PCM - wrapping to WAV is ideal.
-          // For brevity we return as "audio/wav" data URL; adjust per model/codec if needed.
-          resolve(`data:audio/wav;base64,${b64}`);
-        }
-        if (evt.type === "error") {
-          reject(new Error(evt.error || "realtime_error"));
-        }
-      } catch (e) {
-        // Some frames may be binary (ignore); or use ws binary handler if needed.
-      }
-    });
-
-    ws.on("error", reject);
-  });
-}
