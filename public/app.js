@@ -3,20 +3,27 @@
   // ==============================
   // Config
   // ==============================
+  const STREAM_ROUTE = "/api/message/stream"; // POST (transcript) + GET (SSE)
+
+  // Voice detection config
   const FORCE_VAD = false;            // Set true to skip Web Speech and always use VAD
   const VAD_THRESH = 0.02;            // Voice activity RMS threshold (raise if too sensitive)
   const VAD_HANG_MS = 400;            // Hangover to avoid flapping during short pauses
   const AUTO_STOP_SILENCE_MS = 1200;  // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;       // Don't auto-stop before at least this much audio is captured
 
+  // Debug
+  const STREAM_DEBUG = true;
+
   // ==============================
   // State
   // ==============================
+  // Recording
   let mediaRecorder;
   let mediaChunks = [];
   let activeStream = null;
 
-  // Event stream / interrupt state
+  // Event stream / interrupt
   let currentEventSource = null;
   let interrupting = false;
 
@@ -41,20 +48,9 @@
   let talking = false;
   let autoStopping = false;
 
-  // ==============================
-  // Debug
-  // ==============================
-  const STREAM_DEBUG = true;
-  function sLog(...args) {
-    if (!STREAM_DEBUG) return;
-    const ts = new Date().toISOString();
-    console.log(`[stream ${ts}]`, ...args);
-  }
-
-  // ==============================
-  // Endpoints
-  // ==============================
-  const STREAM_ROUTE = "/api/message/stream"; // POST (transcript) + GET (SSE)
+  // Markdown
+  let MD_READY = false;
+  let HL_READY = false;
 
   // ==============================
   // UI refs
@@ -65,7 +61,7 @@
   const transcriptEl = document.getElementById("transcript");
   const answerEl = document.getElementById("answer");
   const audioEl = document.getElementById("audio");
-  const voiceToggleBtn = document.getElementById("voiceToggle");
+  const voiceToggleBtn = document.getElementById("voiceToggle"); // optional
 
   const statusLabels = {
     idle: "Idle",
@@ -74,6 +70,15 @@
     done: "Done",
     error: "Error",
   };
+
+  // ==============================
+  // Debug helper
+  // ==============================
+  function sLog(...args) {
+    if (!STREAM_DEBUG) return;
+    const ts = new Date().toISOString();
+    console.log(`[stream ${ts}]`, ...args);
+  }
 
   // ==============================
   // Audio queue for TTS clips
@@ -117,7 +122,7 @@
   // Voice toggle (SR with VAD fallback)
   // ==============================
   function attachVoiceToggle() {
-    if (!voiceToggleBtn) return;
+    if (!voiceToggleBtn) return; // if no button present, quietly skip
     updateVoiceToggleUi();
 
     voiceToggleBtn.addEventListener("click", async () => {
@@ -139,24 +144,24 @@
       return;
     }
 
+    // Always run VAD: it gives us the end-of-speech auto stop
+    await startVADFallback();
+
     if (FORCE_VAD) {
-      sLog("Voice: enabling VAD (FORCE_VAD)");
-      await startVADFallback();
+      sLog("Voice: enabling VAD only (FORCE_VAD)");
       voiceEnabled = true;
       return;
     }
 
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) {
-      sLog("Voice: SR unavailable → enabling VAD fallback");
-      await startVADFallback();
+      sLog("Voice: SR unavailable → using VAD only");
       voiceEnabled = true;
       return;
     }
 
     initSpeechRecognition(SR);
     safeStartRecognition();
-    await startVADFallback(); // Use VAD alongside SR for robust end-of-speech detection
     voiceEnabled = true;
   }
 
@@ -210,11 +215,11 @@
       if (!voiceEnabled) return;
       sLog("SR onaudiostart → interrupt AI");
       interruptAI();
-      // We don't start/stop here; VAD handles precise start/end
+      // VAD handles exact start/stop and auto-stop
     };
 
     recognition.onresult = () => {
-      // We rely on VAD for start. Keep SR just for wake/interrupt in some browsers.
+      // We rely on VAD for precise timing; SR just wakes/interrupts
     };
 
     recognition.onerror = (e) => {
@@ -232,14 +237,12 @@
           sLog("Persistent SR network errors → continue with VAD only");
           recognitionManuallyPaused = true;
           try { recognition.stop(); } catch {}
-          // VAD remains active; no further action needed
         }
       }
 
       if (err === "not-allowed" || err === "service-not-allowed") {
         recognitionManuallyPaused = true;
         try { recognition.stop(); } catch {}
-        // VAD remains active
       }
     };
 
@@ -268,7 +271,7 @@
   }
 
   // ==============================
-  // VAD fallback (also used for end-of-speech auto-stop)
+  // VAD (also handles end-of-speech auto-stop)
   // ==============================
   async function startVADFallback() {
     try {
@@ -281,7 +284,7 @@
 
       const buf = new Float32Array(analyser.fftSize);
 
-      sLog("VAD running (also handles end-of-speech auto-stop)");
+      sLog("VAD running (handles auto-stop on silence)");
       let rafId = 0;
 
       function loop() {
@@ -310,7 +313,7 @@
         } else {
           // Silence logic / hangover
           if (talking && now - lastSpeechTs > VAD_HANG_MS) {
-            talking = false; // we consider user paused/finished
+            talking = false; // consider user paused/finished
           }
         }
 
@@ -432,8 +435,8 @@
 
       const { transcript } = await postRes.json();
       sLog("Transcript from POST:", transcript?.slice(0, 160) || "<empty>");
-      updateCardBody(transcriptEl, transcript || "");
-      updateCardBody(answerEl, "");
+      await updateCardBody(transcriptEl, transcript || "");
+      await updateCardBody(answerEl, "");
       audioQueue.length = 0;
       audioPlaying = false;
       updateAudio(audioEl, null);
@@ -510,7 +513,7 @@
       es.addEventListener("transcript", (e) => {
         sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.transcript) updateCardBody(transcriptEl, data.transcript);
+        if (data?.transcript) scheduleMarkdownUpdate(transcriptEl, data.transcript);
       });
 
       es.addEventListener("token", (e) => {
@@ -521,36 +524,44 @@
         } else if (typeof data?.token === "string") {
           lastAnswerText += data.token;
         }
-        updateCardBody(answerEl, lastAnswerText);
+        scheduleMarkdownUpdate(answerEl, lastAnswerText);
       });
 
       es.addEventListener("answer", (e) => {
         sawAnyData = true;
         const data = safeParse(e.data);
         lastAnswerText = data?.answer || lastAnswerText;
-        updateCardBody(answerEl, lastAnswerText);
+        scheduleMarkdownUpdate(answerEl, lastAnswerText);
       });
 
       es.addEventListener("finishedParagraph", (e) => {
         sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
+        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl); // data:audio/mpeg;base64,...
       });
 
+      // Server heartbeat
       es.addEventListener("Heartbeat", () => {});
 
+      // Server error payloads (e.g., { message: "no_transcript_available" })
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
-          updateCardBody(answerEl, `Error: ${payload.message}`);
+          scheduleMarkdownUpdate(answerEl, `**Error:** ${payload.message}`);
           setStatus("error");
           end(false);
         }
       });
 
+      // Connection close: EventSource sets onerror when the stream ends.
       es.onerror = () => {
-        if (sawAnyData) { setStatus("done"); end(true); }
-        else { setStatus("error"); end(false); }
+        if (sawAnyData) {
+          setStatus("done");
+          end(true);
+        } else {
+          setStatus("error");
+          end(false);
+        }
       };
     });
   }
@@ -588,6 +599,77 @@
     } else {
       interrupting = false;
     }
+  }
+
+  // ==============================
+  // Markdown support
+  // ==============================
+  function loadScript(src) {
+    return new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = src;
+      s.async = true;
+      s.onload = resolve;
+      s.onerror = () => reject(new Error("Failed to load " + src));
+      document.head.appendChild(s);
+    });
+  }
+
+  async function ensureMarkdown() {
+    if (MD_READY) return;
+    if (!window.marked) {
+      await loadScript("https://cdn.jsdelivr.net/npm/marked/marked.min.js");
+    }
+    if (!window.DOMPurify) {
+      await loadScript("https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js");
+    }
+    if (window.marked) {
+      marked.setOptions({
+        breaks: true,
+        gfm: true,
+        mangle: false,
+        headerIds: true
+      });
+    }
+    MD_READY = true;
+  }
+
+  async function ensureHighlighting() {
+    if (HL_READY) return;
+    if (!window.hljs) {
+      await loadScript("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/common.min.js");
+      const link = document.createElement("link");
+      link.rel = "stylesheet";
+      link.href = "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css";
+      document.head.appendChild(link);
+    }
+    HL_READY = true;
+  }
+
+  async function renderMarkdown(el, mdText) {
+    await ensureMarkdown();
+    const html = DOMPurify.sanitize(marked.parse(mdText || ""));
+    // since your elements are <pre>, make them behave like blocks
+    el.style.whiteSpace = "normal";
+    el.style.fontFamily = "inherit";
+    el.innerHTML = html;
+
+    // code highlighting
+    await ensureHighlighting();
+    el.querySelectorAll("pre code").forEach(block => {
+      try { hljs.highlightElement(block); } catch {}
+    });
+  }
+
+  // Throttle streaming paints
+  let mdPaintScheduled = false;
+  function scheduleMarkdownUpdate(el, text) {
+    if (mdPaintScheduled) return;
+    mdPaintScheduled = true;
+    requestAnimationFrame(async () => {
+      mdPaintScheduled = false;
+      await updateCardBody(el, text);
+    });
   }
 
   // ==============================
@@ -633,7 +715,7 @@
     if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
   }
 
-  function updateCardBody(element, value) {
+  async function updateCardBody(element, value) {
     const text = typeof value === "string" ? value.trim() : "";
     const isTranscript = element.id === "transcript";
     const placeholder = isTranscript ? "Waiting for transcript..." : "Waiting for answer...";
@@ -643,13 +725,15 @@
       element.textContent = placeholder;
     } else {
       element.dataset.empty = "false";
-      element.textContent = value;
-      const card = element.closest(".card");
-      if (card) {
-        card.classList.add("card--active");
-        window.setTimeout(() => card.classList.remove("card--active"), 900);
-      }
+      await renderMarkdown(element, text);
+      flashCard(element.closest(".card"));
     }
+  }
+
+  function flashCard(card) {
+    if (!card) return;
+    card.classList.add("card--active");
+    window.setTimeout(() => card.classList.remove("card--active"), 900);
   }
 
   async function blobToBase64(blob) {
