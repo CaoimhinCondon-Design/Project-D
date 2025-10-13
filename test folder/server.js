@@ -28,3 +28,33 @@ for await (const event of stream) {
 }
 console.log("Below is the fulltext \n\n");
 console.log(fullText);
+
+import express from 'express';
+
+const app = express();
+
+app.get('/stream', (req, res) => {
+  // Tell the client to expect streamed text
+  res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+  res.setHeader('Transfer-Encoding', 'chunked');
+
+  // Send chunks of data every second
+  let count = 0;
+  const interval = setInterval(() => {
+    count++;
+    res.write(`Chunk #${count}\n`);
+
+    if (count >= 5) { // stop after 5 chunks
+      clearInterval(interval);
+      res.end('Stream complete.\n');
+    }
+  }, 1000);
+
+  // Handle client disconnect
+  req.on('close', () => {
+    clearInterval(interval);
+    console.log('Client disconnected');
+  });
+});
+
+app.listen(3000, () => console.log('Listening on http://localhost:3000/stream'));

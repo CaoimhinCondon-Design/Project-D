@@ -139,10 +139,10 @@ OUTPUT
       Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       "Content-Type": "application/json"
     },
+    signal,
     body: JSON.stringify({
       model: "gpt-4o-mini",
       temperature: 0.3,
-      signal,
       messages: [
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: text }
@@ -212,9 +212,10 @@ app.post("/api/message/stream", async (req, res) => {
   if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
 
   res.status(200);
-  res.setHeader("Content-Type", "text/event-stream");
-  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
   res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no"); // respected by nginx & some PaaS
   res.flushHeaders?.();
 
   const sendEvent = (event, payload) => {
