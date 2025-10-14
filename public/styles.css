@@ -25,7 +25,6 @@ body {
   display: flex;
   flex-direction: column;
   gap: 1.75rem;
-  /* leave room for the fixed audio dock */
   padding-bottom: 6rem;
 }
 

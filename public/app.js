@@ -54,7 +54,7 @@
   // Markdown / Code / Math
   let MD_READY = false;
   let HL_READY = false;
-  let KATEX_READY = false;
+  let MJ_READY = false;
 
   // ==============================
   // UI refs
@@ -62,7 +62,7 @@
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const statusEl = document.getElementById("status");
-  // Use let so we can swap <pre> -> <div> (needed for KaTeX & HTML)
+  // Use let so we can swap <pre> -> <div> (needed for HTML/math)
   let transcriptEl = document.getElementById("transcript");
   let answerEl = document.getElementById("answer");
   const audioEl = document.getElementById("audio");
@@ -141,6 +141,7 @@
   }
 
   async function enableVoice() {
+    // Ensure mic permission up-front for better reliability
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true });
     } catch (e) {
@@ -148,6 +149,7 @@
       return;
     }
 
+    // Always run VAD: it gives us the end-of-speech auto stop
     await startVADFallback();
 
     if (FORCE_VAD) {
@@ -172,11 +174,13 @@
     sLog("Voice: disabling");
     voiceEnabled = false;
 
+    // Stop SR if running
     if (recognition) {
       recognitionManuallyPaused = true;
       try { recognition.stop(); } catch {}
     }
 
+    // Stop VAD if active
     if (typeof vadStopFn === "function") {
       try { vadStopFn(); } catch {}
       vadStopFn = null;
@@ -211,13 +215,17 @@
       if (voiceEnabled && !recognitionManuallyPaused) setTimeout(safeStartRecognition, 600);
     };
 
+    // Treat audio start as a user interrupt to begin capture
     recognition.onaudiostart = () => {
       if (!voiceEnabled) return;
       sLog("SR onaudiostart → interrupt AI");
       interruptAI();
+      // VAD handles exact start/stop and auto-stop
     };
 
-    recognition.onresult = () => {};
+    recognition.onresult = () => {
+      // We rely on VAD for precise timing; SR just wakes/interrupts
+    };
 
     recognition.onerror = (e) => {
       const err = e?.error;
@@ -285,19 +293,22 @@
       let rafId = 0;
 
       function loop() {
-        if (!voiceEnabled) return;
+        if (!voiceEnabled) return; // stop sampling if disabled
         analyser.getFloatTimeDomainData(buf);
 
+        // Compute RMS
         let sum = 0;
         for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
         const rms = Math.sqrt(sum / buf.length);
         const now = performance.now();
 
+        // Detect speech start/ongoing
         if (rms > VAD_THRESH) {
           lastSpeechTs = now;
           if (!talking) {
             talking = true;
             sLog("VAD speech start");
+            // If AI is speaking/streaming, interrupt and start recording
             interruptAI();
             if (!isRecording()) {
               pauseRecognitionForRecording();
@@ -305,11 +316,13 @@
             }
           }
         } else {
+          // Silence logic / hangover
           if (talking && now - lastSpeechTs > VAD_HANG_MS) {
-            talking = false;
+            talking = false; // consider user paused/finished
           }
         }
 
+        // Auto-stop on sustained silence while recording
         if (isRecording()) {
           const recMs = now - recordingStartedAt;
           const silenceMs = now - lastSpeechTs;
@@ -342,6 +355,7 @@
   // ==============================
   async function handleStartToggle() {
     try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
+    // If a previous SSE was stuck, close it so we can proceed
     forceCloseSSE("start_toggle");
 
     if (isRecording()) {
@@ -363,7 +377,7 @@
       mediaRecorder = new MediaRecorder(activeStream, mime ? { mimeType: mime } : undefined);
       mediaChunks = [];
       recordingStartedAt = performance.now();
-      lastSpeechTs = performance.now();
+      lastSpeechTs = performance.now(); // seed so immediate auto-stop doesn't trigger
 
       mediaRecorder.addEventListener("dataavailable", ({ data }) => {
         if (data?.size) mediaChunks.push(data);
@@ -407,6 +421,7 @@
     }
 
     try {
+      // Build base64 and POST (with timeout)
       const blob = await stopPromise;
       const audioBase64 = await blobToBase64(blob);
 
@@ -444,7 +459,7 @@
       audioPlaying = false;
       updateAudio(audioEl, null);
 
-      await openEventStream();
+      await openEventStream(); // robust; resolves reliably
       setStatus("done");
     } catch (err) {
       console.error(err);
@@ -481,13 +496,13 @@
   }
 
   // ==============================
-  // Networking — GET SSE
+  // Networking — GET SSE (robust)
   // ==============================
   async function openEventStream() {
     sLog("Opening GET SSE:", STREAM_ROUTE);
 
-    const IDLE_TIMEOUT_MS = 20000;
-    const HARD_CLOSE_MS    = 120000;
+    const IDLE_TIMEOUT_MS = 20000;   // close if no events for 20s
+    const HARD_CLOSE_MS    = 120000; // absolute upper bound 2 min
 
     return new Promise((resolve, reject) => {
       const es = new EventSource(STREAM_ROUTE, { withCredentials: true });
@@ -516,13 +531,15 @@
 
       function bumpActivity() { lastActivity = Date.now(); }
 
+      // Resolve immediately if we force-close from elsewhere (e.g., Start/interrupt)
       const onForcedClose = () => end(true, "externally_closed");
       window.addEventListener(SSE_FORCE_EVENT, onForcedClose, { once: true });
 
+      // Watchdog timers (inactivity + hard close)
       const watchdog = setInterval(() => {
         const now = Date.now();
         if (now - lastActivity > IDLE_TIMEOUT_MS) {
-          setStatus("done");
+          setStatus("done"); // UI won’t look stuck
           end(true, "idle_timeout");
         } else if (now > hardCloseAt) {
           setStatus("done");
@@ -571,11 +588,13 @@
         if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
       });
 
+      // If your server can emit an explicit 'done' event, end immediately
       es.addEventListener("done", () => {
         setStatus("done");
         end(true, "server_done_event");
       });
 
+      // Server-sent error payloads / normal EOS via onerror
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
@@ -583,6 +602,7 @@
           setStatus("error");
           end(false, "server_error_event");
         } else {
+          // This also fires on normal close in some implementations
           if (sawAnyData) {
             setStatus("done");
             end(true, "onerror_after_data");
@@ -602,6 +622,7 @@
     if (interrupting) return;
     interrupting = true;
 
+    // Stop any TTS in progress and clear queue
     try {
       audioQueue.length = 0;
       if (!audioEl.paused) audioEl.pause();
@@ -609,10 +630,13 @@
       audioPlaying = false;
     } catch {}
 
+    // Close any live SSE stream (broadcast a forced-close so listeners resolve)
     forceCloseSSE("interrupt");
 
+    // UI nudge to show we're switching to user
     setStatusLabel("Listening…");
 
+    // If we were already recording, leave it; otherwise start recording
     if (!isRecording()) {
       if (voiceEnabled) pauseRecognitionForRecording();
       handleStartRecording().finally(() => {
@@ -623,6 +647,7 @@
     }
   }
 
+  // Allow other code paths to forcibly close a stuck stream (and notify listeners)
   function forceCloseSSE(reason = "client_close") {
     if (currentEventSource) {
       try { currentEventSource.close(); } catch {}
@@ -633,7 +658,7 @@
   }
 
   // ==============================
-  // Markdown / Code / LaTeX support (fail-safe loaders)
+  // Markdown / Code / MathJax support (fail-safe loaders)
   // ==============================
   function loadCssOnce(href, key) {
     if (document.querySelector(`link[data-key="${key}"]`)) return;
@@ -722,18 +747,19 @@
   }
 
   async function ensureHighlighting() {
+    // If hljs is already present, just mark ready and return
+    if (window.hljs) { HL_READY = true; return; }
     if (HL_READY) return;
 
-    // CSS theme (doesn't matter if this fails)
-    loadCssOnce("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css", "hljs-theme")
-      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css", "hljs-theme2");
+    // CSS theme (browser bundle)
+    loadCssOnce("https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github.min.css", "hljs-theme");
 
-    // IMPORTANT: use the browser UMD build
-    const ok = window.hljs || await loadScriptWithFallback(
+    // IMPORTANT: use the browser CDN bundle (UMD)
+    const ok = await loadScriptWithFallback(
       [
-        "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js",
-        "https://unpkg.com/highlight.js@11.9.0/build/highlight.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
+        "https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js",
+        "https://unpkg.com/@highlightjs/cdn-assets@11.9.0/highlight.min.js"
       ],
       "hljs"
     );
@@ -741,40 +767,43 @@
     HL_READY = !!window.hljs; // do not throw if false
   }
 
-  async function ensureKatex() {
-    if (KATEX_READY && window.katex && window.renderMathInElement) return;
+  // ---- MathJax v3 (instead of KaTeX) ----
+  async function ensureMathJax() {
+    if (MJ_READY && window.MathJax) return;
 
-    // CSS first
-    loadCssOnce("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", "katex-css")
-      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css", "katex-css2");
-
-    // JS core
-    if (!window.katex) {
-      await loadScriptWithFallback(
-        [
-          "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js",
-          "https://unpkg.com/katex@0.16.11/dist/katex.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"
-        ],
-        "katex"
-      );
-    }
-    // Auto-render
-    if (!window.renderMathInElement) {
-      await loadScriptWithFallback(
-        [
-          "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js",
-          "https://unpkg.com/katex@0.16.11/dist/contrib/auto-render.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"
-        ],
-        "katex-auto"
-      );
+    // Configure MathJax BEFORE loading its script
+    if (!window.MathJax) {
+      window.MathJax = {
+        startup: {
+          // We call typeset manually
+          typeset: false
+        },
+        options: {
+          // Don't scan inside code blocks or preformatted text
+          skipHtmlTags: ["script", "noscript", "style", "textarea", "pre", "code"]
+        },
+        tex: {
+          inlineMath: [["$", "$"], ["\\(", "\\)"]],
+          displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+          // A few safe macros
+          macros: { RR: "\\mathbb{R}", NN: "\\mathbb{N}", ZZ: "\\mathbb{Z}" }
+        }
+      };
     }
 
-    KATEX_READY = !!(window.katex && window.renderMathInElement);
+    const ok = await loadScriptWithFallback(
+      [
+        "https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-mml-chtml.min.js",
+        "https://cdnjs.cloudflare.com/ajax/libs/mathjax/3.2.2/es5/tex-mml-chtml.min.js",
+        "https://unpkg.com/mathjax@3/es5/tex-mml-chtml.min.js"
+      ],
+      "mathjax"
+    );
+
+    MJ_READY = !!(ok && window.MathJax);
   }
 
-  // Swap <pre> → <div> so KaTeX/HTML can render inside
+  // Swap <pre> → <div> so HTML/math can render inside
   function ensureRenderableContainer(el) {
     if (el && el.tagName === "PRE") {
       const div = document.createElement("div");
@@ -812,7 +841,7 @@
       el.textContent = src;
     }
 
-    // Syntax highlighting (best-effort)
+    // Syntax highlighting (if available)
     try {
       await ensureHighlighting();
       if (window.hljs) {
@@ -824,25 +853,15 @@
       console.warn("Highlighting failed:", e);
     }
 
-    // LaTeX (KaTeX) rendering (best-effort)
+    // MathJax typesetting (only this element)
     try {
-      await ensureKatex();
-      if (window.renderMathInElement && window.katex) {
-        window.renderMathInElement(el, {
-          delimiters: [
-            { left: "$$", right: "$$", display: true },
-            { left: "\\[", right: "\\]", display: true },
-            { left: "$",  right: "$",  display: false },
-            { left: "\\(", right: "\\)", display: false },
-          ],
-          throwOnError: false,
-          strict: "warn",
-          trust: false,
-          macros: { "\\RR": "\\mathbb{R}", "\\NN": "\\mathbb{N}", "\\ZZ": "\\mathbb{Z}" }
-        });
+      await ensureMathJax();
+      if (window.MathJax && window.MathJax.typesetPromise) {
+        // Typeset only the updated element, avoids reprocessing the whole page
+        await window.MathJax.typesetPromise([el]);
       }
     } catch (e) {
-      console.warn("KaTeX render failed:", e);
+      console.warn("MathJax typeset failed:", e);
     }
   }
 
@@ -927,7 +946,7 @@
     const buffer = await blob.arrayBuffer();
     let binary = "";
     const bytes = new Uint8Array(buffer);
-    const chunkSize = 0x8000;
+    const chunkSize = 0x8000; // 32KB
     for (let i = 0; i < bytes.length; i += chunkSize) {
       binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
     }
