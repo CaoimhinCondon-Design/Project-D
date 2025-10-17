@@ -10,6 +10,8 @@ const PORT = process.env.PORT || 3000;
 app.use(express.static("public"));
 app.use(express.json({ limit: "25mb" })); // for base64 JSON payloads
 
+let chats = {};
+
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -32,31 +34,7 @@ async function transcribeWebmBase64(audioBase64) {
   return json.text || "";
 }
 
-// Helper: call GPT for reasoning
-async function completeAnswer(prompt) {
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      temperature: 0.2,
-      messages: [
-        { role: "system", content: "You are concise and helpful." },
-        { role: "user", content: prompt }
-      ]
-    })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  const j = await r.json();
-  return j.choices?.[0]?.message?.content?.trim() ?? "";
-}
-
-// Helper: call GPT for reasoning with streamed tokens
-async function streamAnswer(prompt, { onToken, signal } = {}) {
-const SYSTEM_PROMPT = `
+const Reasoning_SYSTEM_PROMPT = `
 You are a helpful assistant that writes in full Markdown.
 
 STYLE
@@ -71,6 +49,9 @@ CONTENT
 - Mirror the user’s language.
 - If unsafe, refuse briefly and suggest a safe alternative.
 `;
+
+// Helper: call GPT for reasoning with streamed tokens
+async function streamAnswer(prompt, { onToken, signal } = {}) {
 
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
@@ -113,7 +94,7 @@ if (safeOnToken) {
   return fullText.trim();
 }
 
-const SYSTEM_PROMPT = `
+const SUMMERY_SYSTEM_PROMPT = `
 REQUIREMENTS
 Mirror the user’s tone and language style naturally.
 
@@ -135,14 +116,22 @@ OUTPUT
 Return only the short spoken-style summary text.
 `;
 
-let convo = [
-  { role: "system", content: SYSTEM_PROMPT },
-]
-let currentConvoIndex = 0;
+function newChat(){
+  const chatID = toString(Math.floor(Math.random() * 10000)) + now.toISOString();
+  chats[chatID] = {};
+  chats[chatID][0] = [
+    { role: "system", content: Reasoning_SYSTEM_PROMPT },
+  ];
+  chats[chatID][1] = [
+    { role: "system", content: SUMMERY_SYSTEM_PROMPT },
+  ];
+  chats[chatID][reasoningBuffer] = "";
+  return chatID;
+}
 
 // Helper: summarize (short) for speaking
-async function summarizeForSpeech(text, signal) {
-  convo.push({ role: "user", content: `PARAGRAPH:\n${text}`})
+async function summarizeForSpeech(text, chatID, signal) {
+  chats[chatID][1].push({ role: "user", content: `PARAGRAPH:\n${text}`})
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
@@ -160,7 +149,7 @@ async function summarizeForSpeech(text, signal) {
   if (!r.ok) throw new Error(await r.text());
   const j = await r.json();
   const output = j.choices?.[0]?.message?.content?.trim() ?? "";
-  convo.push({ role: "assistant", content: output})
+  chats[chatID][1].push({ role: "assistant", content: output})
     if (output.trim() === "無"){
     return ""
   }
@@ -190,46 +179,30 @@ async function speakWithTTS(summaryText) {
 }
 
 /**
- * POST /api/message
- * { audioBase64: <base64 webm/opus> }
- */
-app.post("/api/message", async (req, res) => {
-  try {
-    const { audioBase64 } = req.body;
-    if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
-
-    // 1) STT (Whisper)
-    const transcript = await transcribeWebmBase64(audioBase64);
-
-    // 2) Reasoning (GPT)
-    const answer = await completeAnswer(transcript);
-
-    // 3) Summarize + speak (OpenAI TTS - simplest path)
-    const shortSummary = await summarizeForSpeech(answer);
-    const ttsDataUrl = await speakWithTTS(shortSummary);
-
-    res.json({ transcript, answer, shortSummary, ttsDataUrl });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ error: "processing_failed" });
-  }
-});
-
-/**
  * get and POST /api/message/stream
- * Streams GPT tokens (SSE) while preserving the existing processing pipeline.
  */
-let transcript = "" //TODO get rid of this
+app.get("/api/new_chat", (_req, res) => {
+  try{
+    let chatID = newChat();
+    res.json({chatID});
+  }
+  catch (e){
+    console.error(e);
+    res.status(500).json({ error: "new_chat_creation_failed" });
+  }
+})
 
 app.post("/api/message/stream", async (req, res) => {
   currentConvoIndex = 0;
   try {
-    const { audioBase64 } = req.body;
+    const { audioBase64, chatID } = req.body;
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
+    if (!chatID) return res.status(400).json({ error: "chatID required" });
 
     // 1) STT (Whisper)
-    transcript = await transcribeWebmBase64(audioBase64);
-    convo.push({ role: "user", content: transcript })
+    const transcript = await transcribeWebmBase64(audioBase64);
+    chats[chatID][0].push({ role: "user", content: transcript});
+    chats[chatID][1].push({ role: "user", content: `Users original question was:\n${transcript}`});
 
     res.json({transcript});
   } catch (e) {
@@ -239,6 +212,12 @@ app.post("/api/message/stream", async (req, res) => {
 })
 
 app.get("/api/message/stream", async (req, res) => {
+  const { chatID } = req.query; // 👈 get it from the query string
+  if (!chatID) {
+    res.status(400).json({ error: "chatID required" });
+    return;
+  }
+
   res.status(200);
   res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
   res.setHeader("Cache-Control", "no-cache, no-transform");
@@ -248,6 +227,14 @@ app.get("/api/message/stream", async (req, res) => {
 
   const sendEvent = (event, payload) => {
     const trimedEvent = event.trim();
+    if (trimedEvent == "answer"){
+      chats[chatID][reasoningBuffer] = ""; //reset reasoning buffer when we have full answer
+      chats[chatID][0].push({ role: "assistant", content: payload.answer});
+      chats[chatID][1].push({ role: "assistant", content: payload.answer});
+    }
+    if (trimedEvent == "token"){
+      chats[chatID][reasoningBuffer] = payload.text;
+    }
     let info = ""
     if (trimedEvent == "status" && payload.stage){
       info = payload.stage
@@ -268,8 +255,8 @@ app.get("/api/message/stream", async (req, res) => {
       //console.log(currentConvoIndex + " ==? " + index)
     }
     if (streamClosed) return;
-    sendEvent("subStatus", { stage: `working on paragraph ${index}` });
-    const shortSummary = await summarizeForSpeech(paragraph, signal);
+    sendEvent("subStatus", { stage: `working on paragraph ${index}`, currentParagraph: paragraph });
+    const shortSummary = await summarizeForSpeech(paragraph, chatID, signal);
     currentConvoIndex++
     let ttsDataUrl = ''
     if (shortSummary !== ''){
