@@ -186,6 +186,19 @@ app.get("/api/new_chat", (_req, res) => {
   }
 })
 
+app.get('/data', (req, res) => {
+  const { chatID } = req.query;
+  if (!chatID) {
+    res.status(400).json({ error: "chatID required" });
+    return;
+  }
+
+  const reasoning = chats[chatID][0]
+  const summery = chats[chatID][1]
+
+  res.json({ reasoning, summery });
+})
+
 app.post("/api/message/stream", async (req, res) => {
   try {
     const { audioBase64, chatID } = req.body;
