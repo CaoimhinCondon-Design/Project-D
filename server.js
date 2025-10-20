@@ -212,7 +212,7 @@ app.post("/api/message/stream", async (req, res) => {
 })
 
 app.get("/api/message/stream", async (req, res) => {
-  const { chatID } = req.query; // 👈 get it from the query string
+  const { chatID } = req.query;
   if (!chatID) {
     res.status(400).json({ error: "chatID required" });
     return;
