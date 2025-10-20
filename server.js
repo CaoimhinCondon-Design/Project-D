@@ -297,7 +297,12 @@ app.get("/api/message/stream", async (req, res) => {
       signal,
       onToken: async ({ token, text, done }) => {
         //console.log("running onToken");
-        if (streamClosed) return;
+        if (streamClosed) {
+           const buffer = chats[chatID].reasoningBuffer
+           chats[chatID][0].push({ role: "assistant", content: buffer});
+           chats[chatID][0].push({ role: "user", content: "*USER INTERRUPTED ON PARAGRAPH *" + paragraphIndex});
+          return;
+        }
         //console.log("still running");
         paragraphs = text.split(/\n\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
