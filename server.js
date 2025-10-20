@@ -186,6 +186,19 @@ app.get("/api/new_chat", (_req, res) => {
   }
 })
 
+app.get('/data', (req, res) => {
+  const { chatID } = req.query;
+  if (!chatID) {
+    res.status(400).json({ error: "chatID required" });
+    return;
+  }
+
+  const reasoning = chats[chatID][0]
+  const summery = chats[chatID][1]
+
+  res.json({ reasoning, summery });
+})
+
 app.post("/api/message/stream", async (req, res) => {
   try {
     const { audioBase64, chatID } = req.body;
@@ -286,7 +299,7 @@ app.get("/api/message/stream", async (req, res) => {
         //console.log("running onToken");
         if (streamClosed) return;
         //console.log("still running");
-        paragraphs = text.split(/\n/);
+        paragraphs = text.split(/\n\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
           const p = paragraphs[currentIndex].trim();
           if (p) {
