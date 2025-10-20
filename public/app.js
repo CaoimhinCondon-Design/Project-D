@@ -4,6 +4,7 @@
   // Config
   // ==============================
   const STREAM_ROUTE = "/api/message/stream"; // POST (transcript) + GET (SSE)
+  const NEW_CHAT_ROUTE = "/api/new_chat";     // create chat IDs server-side
 
   // Voice detection config
   const FORCE_VAD = false;            // Set true to skip Web Speech and always use VAD
@@ -17,6 +18,50 @@
 
   // Custom event name to signal forced SSE close (so promises resolve cleanly)
   const SSE_FORCE_EVENT = "SSE_FORCE_CLOSE";
+
+  // ==============================
+  // Session (multi-chat, per tab)
+  // ==============================
+  // session shape:
+  // {
+  //   currentChatID: string|null,
+  //   chats: {
+  //     [id]: {
+  //       id, title, createdAt, lastUpdatedAt,
+  //       lastTranscript, lastAnswer
+  //     }
+  //   }
+  // }
+  function loadSession() {
+    try { return JSON.parse(sessionStorage.getItem("pd_session")) || { currentChatID: null, chats: {} }; }
+    catch { return { currentChatID: null, chats: {} }; }
+  }
+  function saveSession(next) {
+    sessionStorage.setItem("pd_session", JSON.stringify(next));
+    renderChatSelect();
+  }
+  let state = loadSession();
+
+  function upsertChatSnapshot(id, patch) {
+    const prev = state.chats[id] || {
+      id,
+      title: `Chat ${id.slice(-4)}`,
+      createdAt: Date.now(),
+      lastUpdatedAt: Date.now(),
+      lastTranscript: "",
+      lastAnswer: ""
+    };
+    const next = { ...prev, ...patch, lastUpdatedAt: Date.now() };
+    state.chats[id] = next;
+    saveSession(state);
+  }
+  function setCurrentChat(id) {
+    state.currentChatID = id;
+    saveSession(state);
+  }
+  function getCurrentChat() {
+    return state.currentChatID ? state.chats[state.currentChatID] : null;
+  }
 
   // ==============================
   // State
@@ -62,11 +107,15 @@
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
   const statusEl = document.getElementById("status");
-  // Use let so we can swap <pre> -> <div> (needed for KaTeX & HTML)
   let transcriptEl = document.getElementById("transcript");
   let answerEl = document.getElementById("answer");
   const audioEl = document.getElementById("audio");
   const voiceToggleBtn = document.getElementById("voiceToggle"); // optional
+
+  // multi-chat controls
+  const newChatBtn = document.getElementById("newChatBtn");
+  const deleteChatBtn = document.getElementById("deleteChatBtn");
+  const chatSelectEl = document.getElementById("chatSelect");
 
   const statusLabels = {
     idle: "Idle",
@@ -119,9 +168,95 @@
   updateCardBody(answerEl, "");
   resetRecordingState();
 
+  // wire core controls
   startBtn.addEventListener("click", handleStartToggle);
   stopBtn.addEventListener("click", handleStopRecording);
   attachVoiceToggle();
+
+  // wire chat controls
+  newChatBtn?.addEventListener("click", newChat);
+  deleteChatBtn?.addEventListener("click", deleteCurrentChat);
+  chatSelectEl?.addEventListener("change", (e) => switchChat(e.target.value));
+
+  // ensure we have a chat on boot
+  (async () => {
+    if (!state.currentChatID) {
+      await newChat(); // creates on server + selects it
+    } else {
+      // restore UI from snapshot
+      const c = getCurrentChat();
+      if (c) {
+        await updateCardBody(transcriptEl, c.lastTranscript || "");
+        await updateCardBody(answerEl, c.lastAnswer || "");
+      }
+      renderChatSelect();
+    }
+  })().catch(console.error);
+
+  // ==============================
+  // Chat management
+  // ==============================
+  async function ensureServerChat() {
+    const r = await fetch(NEW_CHAT_ROUTE, { credentials: "same-origin" });
+    if (!r.ok) throw new Error(await r.text());
+    const { chatID } = await r.json();
+    if (!chatID) throw new Error("No chatID returned");
+    return chatID;
+  }
+
+  async function newChat() {
+    forceCloseSSE("new_chat");
+    const id = await ensureServerChat();
+    upsertChatSnapshot(id, { id });
+    setCurrentChat(id);
+    renderChatSelect();
+    // clear UI for the new chat
+    await updateCardBody(transcriptEl, "");
+    await updateCardBody(answerEl, "");
+    updateAudio(audioEl, null);
+    setStatus("idle");
+  }
+
+  function renderChatSelect() {
+    if (!chatSelectEl) return;
+    const ids = Object.keys(state.chats)
+      .sort((a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0));
+    chatSelectEl.innerHTML = "";
+    ids.forEach((id) => {
+      const opt = document.createElement("option");
+      const c = state.chats[id];
+      opt.value = id;
+      opt.textContent = c.title || id;
+      if (id === state.currentChatID) opt.selected = true;
+      chatSelectEl.appendChild(opt);
+    });
+  }
+
+  async function switchChat(id) {
+    if (!id || !state.chats[id]) return;
+    forceCloseSSE("switch_chat");
+    setCurrentChat(id);
+    const c = state.chats[id];
+    await updateCardBody(transcriptEl, c.lastTranscript || "");
+    await updateCardBody(answerEl, c.lastAnswer || "");
+    setStatus("idle");
+    renderChatSelect();
+  }
+
+  async function deleteCurrentChat() {
+    const id = state.currentChatID;
+    if (!id) return;
+    forceCloseSSE("delete_chat");
+    delete state.chats[id];
+    state.currentChatID = null;
+    saveSession(state);
+    const remaining = Object.keys(state.chats);
+    if (remaining.length === 0) {
+      await newChat();
+    } else {
+      await switchChat(remaining[0]);
+    }
+  }
 
   // ==============================
   // Voice toggle (SR with VAD fallback)
@@ -416,6 +551,7 @@
 
       let postRes;
       try {
+        // 🔴 include chatID with POST
         postRes = await fetch(STREAM_ROUTE, {
           method: "POST",
           headers: {
@@ -424,7 +560,7 @@
             "Cache-Control": "no-cache",
           },
           credentials: "same-origin",
-          body: JSON.stringify({ audioBase64 }),
+          body: JSON.stringify({ audioBase64, chatID: state.currentChatID }),
           signal: ctrl.signal,
         });
       } finally {
@@ -440,6 +576,8 @@
       sLog("Transcript from POST:", transcript?.slice(0, 160) || "<empty>");
       await updateCardBody(transcriptEl, transcript || "");
       await updateCardBody(answerEl, "");
+      upsertChatSnapshot(state.currentChatID, { lastTranscript: transcript || "", lastAnswer: "" });
+
       audioQueue.length = 0;
       audioPlaying = false;
       updateAudio(audioEl, null);
@@ -484,13 +622,18 @@
   // Networking — GET SSE
   // ==============================
   async function openEventStream() {
-    sLog("Opening GET SSE:", STREAM_ROUTE);
+    const id = state.currentChatID;
+    if (!id) return;
+
+    sLog("Opening GET SSE:", STREAM_ROUTE, "chatID=", id);
 
     const IDLE_TIMEOUT_MS = 20000;
     const HARD_CLOSE_MS    = 120000;
 
     return new Promise((resolve, reject) => {
-      const es = new EventSource(STREAM_ROUTE, { withCredentials: true });
+      // 🔴 pass chatID in query
+      const url = `${STREAM_ROUTE}?chatID=${encodeURIComponent(id)}`;
+      const es = new EventSource(url, { withCredentials: true });
       currentEventSource = es;
 
       let lastActivity = Date.now();
@@ -556,6 +699,7 @@
           lastAnswerText += data.token;
         }
         scheduleMarkdownUpdate(answerEl, lastAnswerText);
+        upsertChatSnapshot(id, { lastAnswer: lastAnswerText });
       });
 
       es.addEventListener("answer", (e) => {
@@ -563,6 +707,7 @@
         const data = safeParse(e.data);
         lastAnswerText = data?.answer || lastAnswerText;
         scheduleMarkdownUpdate(answerEl, lastAnswerText);
+        upsertChatSnapshot(id, { lastAnswer: lastAnswerText });
       });
 
       es.addEventListener("finishedParagraph", (e) => {
