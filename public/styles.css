@@ -18,17 +18,15 @@
   --msg-user-text: #f8fafc;
   --msg-code-bg: #0f172a;
 
-  --radius-xl: 14px;
+  --radius-xl: 12px;
   --radius-lg: 10px;
   --radius-md: 8px;
 
   --shadow-soft: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px -8px rgba(0,0,0,.06);
-  --shadow-float: 0 6px 24px -10px rgba(0,0,0,.12);
 
-  font-synthesis-weight: none;
-  text-rendering: optimizeLegibility;
-  -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
+  /* height of the audio dock so we can subtract it from viewport */
+  --dock-h: 64px;
+  --page-pad: 10px;
 
   font-size: 16px;
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
@@ -49,10 +47,11 @@
     --msg-user: #141a33;
     --msg-user-text: #e6edf6;
     --msg-code-bg: #0b1220;
-
-    --shadow-soft: 0 1px 2px rgba(0,0,0,.5), 0 6px 18px -10px rgba(0,0,0,.6);
-    --shadow-float: 0 12px 34px -16px rgba(0,0,0,.8);
   }
+}
+
+html, body {
+  height: 100%;
 }
 
 body {
@@ -61,64 +60,70 @@ body {
   display: flex;
   justify-content: center;
   background: var(--bg);
+  overflow: hidden; /* page itself never scrolls */
 }
 
 /* =========================================================
    App Layout
    ========================================================= */
+/* default single-column pages (kept for compatibility) */
 .app {
   width: min(48rem, 100%);
-  padding: 1.25rem 1rem 6rem; /* extra bottom for audio dock */
+  padding: var(--page-pad);
   display: flex;
   flex-direction: column;
-  gap: 1rem;
+  gap: 10px;
+  height: calc(100vh - var(--dock-h)); /* use full height minus audio dock */
 }
 
+/* two-column chat layout */
 .app.layout {
   width: min(1200px, 100%);
-  padding: 1rem 1rem 6rem;
+  padding: var(--page-pad);
   display: grid;
   grid-template-columns: 280px 1fr;
-  gap: 1rem;
+  gap: 10px;
+  height: calc(100vh - var(--dock-h)); /* fill viewport height */
 }
 
 /* =========================================================
-   Sidebar (Chats)
+   Sidebar (Chats) — fills column height and scrolls internally
    ========================================================= */
 .sidebar {
-  display: flex;
-  flex-direction: column;
-  gap: .75rem;
+  display: grid;
+  grid-template-rows: auto 1fr;
+  gap: 8px;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  padding: .9rem;
+  padding: 10px;
   box-shadow: var(--shadow-soft);
-  min-height: 60vh;
+  min-height: 0; /* allow child to shrink in grid */
 }
 
 .sidebar__header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: .5rem;
+  gap: 6px;
 }
 
 .sidebar__title {
   margin: 0;
-  font-size: .95rem;
+  font-size: .92rem;
   font-weight: 700;
   letter-spacing: .02em;
   color: var(--text);
 }
 
-.sidebar__actions { display: flex; gap: .5rem; }
+.sidebar__actions { display: flex; gap: 6px; }
 
 .chat-list {
+  overflow: auto;   /* independent scroll */
+  min-height: 0;    /* needed for proper overflow in grid */
   display: flex;
   flex-direction: column;
-  gap: .4rem;
-  overflow: auto;
+  gap: 6px;
   padding-right: 2px;
 }
 
@@ -128,30 +133,34 @@ body {
   border: 1px solid var(--border);
   background: transparent;
   color: var(--text);
-  padding: .55rem .7rem;
+  padding: .5rem .65rem;
   border-radius: var(--radius-md);
   cursor: pointer;
   transition: background-color .12s ease, border-color .12s ease;
+  font-size: .92rem;
 }
-
 .chat-list__item:hover { background: rgba(0,0,0,.04); }
-@media (prefers-color-scheme: dark) { .chat-list__item:hover { background: rgba(255,255,255,.04); } }
-
+@media (prefers-color-scheme: dark) {
+  .chat-list__item:hover { background: rgba(255,255,255,.04); }
+}
 .chat-list__item[aria-current="true"] {
   background: rgba(37,99,235,.08);
   border-color: rgba(37,99,235,.25);
 }
 
 /* =========================================================
-   Chat Area
+   Chat Area — fills column height; internal scroll for messages
    ========================================================= */
 .chat {
   display: grid;
   grid-template-rows: auto 1fr auto; /* header, messages, composer */
-  gap: .75rem;
-  min-height: 70vh;
+  gap: 8px;
+  min-height: 0;  /* for grid overflow */
+  height: 100%;
+  overflow: hidden; /* prevent page scroll; messages will scroll */
 }
 
+/* Header */
 .chat__header {
   display: flex;
   align-items: center;
@@ -159,52 +168,48 @@ body {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  padding: .8rem 1rem;
+  padding: 10px 12px;
   box-shadow: var(--shadow-soft);
 }
-
 .chat__title {
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 1rem;
   font-weight: 700;
-  letter-spacing: 0;
 }
 
-/* =========================================================
-   Messages Pane (refined, stripe style)
-   ========================================================= */
+/* Messages Pane — independent scroll */
 .messages {
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   box-shadow: var(--shadow-soft);
-  overflow: auto;
+  overflow: auto;     /* independent scroll */
+  min-height: 0;      /* required for correct overflow */
   display: flex;
   flex-direction: column;
-  gap: 0; /* stripes touch with separators */
-  min-height: 40vh;
+  gap: 0;             /* stripe style */
+  padding: 2px;       /* tiny inset to keep separators visible */
 }
 
-/* message row */
+/* message row centered on a readable column */
 .msg {
   display: grid;
-  grid-template-columns: 1fr minmax(0, 900px) 1fr; /* center column */
-  padding: .25rem 0;
+  grid-template-columns: 1fr minmax(0, 900px) 1fr;
+  padding: 2px 0;
 }
-
-/* inner */
 .msg__bubble {
   grid-column: 2;
   width: 100%;
   border-radius: var(--radius-lg);
-  padding: .9rem 1rem;
+  padding: .8rem .95rem;
   border: 1px solid var(--border);
   box-shadow: none;
   word-break: break-word;
   line-height: 1.6;
+  font-size: .96rem;
 }
 
-/* assistant = neutral card with subtle left rule */
+/* assistant stripe with subtle left rule */
 .msg--assistant .msg__bubble {
   background: var(--msg-assistant);
   position: relative;
@@ -212,84 +217,71 @@ body {
 .msg--assistant .msg__bubble::before {
   content: "";
   position: absolute;
-  left: 0;
-  top: .9rem;
-  bottom: .9rem;
+  left: 0; top: .75rem; bottom: .75rem;
   width: 3px;
   border-radius: 2px;
   background: rgba(37,99,235,.5);
 }
-
-/* user = dark stripe (but still card-like), aligned the same column */
+/* user stripe dark */
 .msg--user .msg__bubble {
   background: var(--msg-user);
   color: var(--msg-user-text);
   border-color: rgba(255,255,255,.08);
 }
 
-/* separators between messages */
-.msg + .msg .msg__bubble {
-  border-top-left-radius: 0;
-  border-top-right-radius: 0;
-}
+/* separators between messages (subtle) */
+.msg + .msg .msg__bubble { border-top-left-radius: 0; border-top-right-radius: 0; }
 .msg:first-child .msg__bubble { border-top-left-radius: var(--radius-lg); border-top-right-radius: var(--radius-lg); }
 .msg:last-child  .msg__bubble { border-bottom-left-radius: var(--radius-lg); border-bottom-right-radius: var(--radius-lg); }
+.msg:not(:first-child) .msg__bubble { border-top: 1px solid var(--border); }
 
-/* gentle divider */
-.msg:not(:first-child) .msg__bubble {
-  border-top: 1px solid var(--border);
-}
-
-/* code & markdown inside bubbles */
+/* Markdown/code */
 .msg__bubble pre,
 .msg__bubble code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
-
 .msg__bubble pre {
   background: var(--msg-code-bg);
   color: #e6edf6;
-  padding: .85rem;
+  padding: .8rem;
   border-radius: 8px;
   overflow: auto;
-  margin: .75rem 0 0;
+  margin: .7rem 0 0;
   line-height: 1.55;
   font-size: .9rem;
   border: 1px solid rgba(255,255,255,.08);
 }
-
-.msg--assistant .msg__bubble pre {
-  border-color: rgba(16,24,40,.25);
-}
+.msg--assistant .msg__bubble pre { border-color: rgba(16,24,40,.25); }
 @media (prefers-color-scheme: dark) {
   .msg--assistant .msg__bubble pre { border-color: rgba(255,255,255,.08); }
 }
 
-.msg__bubble .hljs { background: transparent; }
-.msg__bubble .katex { font-size: 1rem; line-height: 1.4; }
-.msg__bubble .katex-display { overflow-x: auto; padding: .25rem 0; }
-
 /* =========================================================
-   Composer (bottom controls)
+   Composer (ALWAYS visible) — sticky inside chat column
    ========================================================= */
 .composer {
+  position: sticky;
+  bottom: 0;            /* stick to bottom of chat column */
+  z-index: 5;           /* above messages scroll */
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
-  padding: .75rem 1rem;
+  padding: 8px 10px;
   box-shadow: var(--shadow-soft);
 }
+.btn-group {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+}
 
-.btn-group { display: flex; gap: .5rem; flex-wrap: wrap; }
-
-/* =========================================================
-   Buttons & Status
-   ========================================================= */
+/* Buttons & Status (compact) */
 .button {
   display: inline-flex;
   justify-content: center;
   align-items: center;
-  padding: .7rem .95rem;
+  padding: .6rem .85rem;
   border-radius: 8px;
   font-weight: 600;
   letter-spacing: .01em;
@@ -298,33 +290,28 @@ body {
   color: var(--text);
   cursor: pointer;
   transition: background-color .12s ease, border-color .12s ease, box-shadow .12s ease;
-  min-height: 2.6rem;
+  min-height: 2.4rem;
 }
-
 .button:hover:not(:disabled) { background: rgba(0,0,0,.04); }
-@media (prefers-color-scheme: dark) { .button:hover:not(:disabled) { background: rgba(255,255,255,.04); } }
-
-.button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-.button:disabled { cursor: not-allowed; opacity: .5; }
-
-.button--danger {
-  background: #ef4444;
-  color: #fff;
-  border-color: #ef4444;
+@media (prefers-color-scheme: dark) {
+  .button:hover:not(:disabled) { background: rgba(255,255,255,.06); }
 }
+.button:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+.button:disabled { cursor: not-allowed; opacity: .55; }
+.button--danger { background: #ef4444; color: #fff; border-color: #ef4444; }
 .button--danger:hover:not(:disabled) { background: #dc2626; border-color: #dc2626; }
 
 .panel__status {
   display: inline-flex;
   align-items: center;
-  gap: .5rem;
-  font-size: .9rem;
+  gap: 6px;
+  font-size: .88rem;
   font-weight: 600;
   color: var(--muted);
 }
 .panel__status::before {
   content: "";
-  width: .6rem; height: .6rem; border-radius: 999px;
+  width: .55rem; height: .55rem; border-radius: 999px;
   background-color: #94a3b8;
   transition: background-color .2s ease, transform .2s ease;
 }
@@ -340,7 +327,7 @@ body {
 }
 
 /* =========================================================
-   Audio Dock (unchanged, slightly flattened)
+   Audio Dock (unchanged, keeps its own fixed layer)
    ========================================================= */
 .audio-dock {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
@@ -349,15 +336,15 @@ body {
   backdrop-filter: blur(8px);
   border-top: 1px solid rgba(148, 163, 184, 0.25);
   padding: 10px 16px;
+  height: var(--dock-h);
+  display: flex; align-items: center;
 }
 .audio-dock__inner {
   max-width: min(1200px, 100%);
   margin: 0 auto;
-  display: flex; align-items: center; gap: 12px;
+  display: flex; align-items: center; gap: 12px; width: 100%;
 }
-.audio-dock__label {
-  color: #e5e7eb; font-size: .9rem; white-space: nowrap; user-select: none; opacity: .9;
-}
+.audio-dock__label { color: #e5e7eb; font-size: .9rem; white-space: nowrap; user-select: none; opacity: .9; }
 .audio-dock audio {
   width: 100%; display: block; border-radius: 10px;
   background: rgba(2,6,23,.35);
@@ -378,39 +365,15 @@ body {
 .audio-dock audio::-webkit-media-controls-current-time-display,
 .audio-dock audio::-webkit-media-controls-time-remaining-display { color: #e5e7eb; }
 
-@media (prefers-color-scheme: dark) {
-  .audio-dock audio::-webkit-media-controls-enclosure { background-color: rgba(3, 13, 59, 0.45); }
-  .audio-dock audio::-webkit-media-controls-current-time-display,
-  .audio-dock audio::-webkit-media-controls-time-remaining-display { color: #f8fafc; }
-}
-
 /* =========================================================
-   Legacy Cards (kept for any older views)
+   Legacy hero/cards hidden in chat layout (kept for other pages)
    ========================================================= */
-.hero { display: none; }              /* hide old hero on chat layout */
-.stack { display: none; }             /* hide legacy cards by default */
-
-.card,
-.panel {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  padding: 1rem;
-  box-shadow: var(--shadow-soft);
-}
-.card__title { margin: 0; font-size: .9rem; font-weight: 700; color: var(--muted); letter-spacing: .04em; }
-.card__body {
-  flex: 1; color: var(--text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
-  font-size: .92rem; line-height: 1.6; white-space: pre-wrap; word-break: break-word; margin: 0;
-}
-.card__body[data-empty="true"] { color: #94a3b8; }
+.hero, .stack { display: none; }
 
 /* =========================================================
-   Responsive tweaks
+   Responsive
    ========================================================= */
 @media (max-width: 960px) {
   .app.layout { grid-template-columns: 1fr; }
   .sidebar { order: -1; }
-  .messages { min-height: 50vh; }
 }
