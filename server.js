@@ -243,7 +243,9 @@ app.get("/api/message/stream", async (req, res) => {
     if (trimedEvent == "status" && payload.stage){
       info = payload.stage
     }
-    console.log("Sent Event: " + event + " " + info)
+    if (trimedEvent !== "Heartbeat"){
+      console.log("Sent Event: " + event + " " + info)
+    }
     res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
