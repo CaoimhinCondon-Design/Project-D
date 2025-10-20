@@ -110,7 +110,6 @@ Return only the short spoken-style summary text.
 function newChat(){
   const now = new Date();
   const chatID = Math.floor(Math.random() * 1000000000000000).toString();
-  console.log(chatID);
   chats[chatID] = {};
   chats[chatID][0] = [
     { role: "system", content: Reasoning_SYSTEM_PROMPT },
@@ -178,7 +177,6 @@ app.get("/api/new_chat", (_req, res) => {
   try{
     let chatID = newChat();
     res.json({chatID});
-    console.log("ChatID is : " + chatID)
   }
   catch (e){
     console.error(e);
@@ -202,7 +200,6 @@ app.get('/data', (req, res) => {
 app.post("/api/message/stream", async (req, res) => {
   try {
     const { audioBase64, chatID } = req.body;
-    console.log("ChatID on post is : " + chatID)
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
     if (!chatID) return res.status(400).json({ error: "chatID required" });
 
