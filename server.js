@@ -59,9 +59,9 @@ async function streamAnswer(chatID, { onToken, signal } = {}) {
   let token;
 
   const stream = await client.responses.create({
-    model: "gpt-4o-mini",
+    model: "gpt-5-nano",
     input: chats[chatID][0],
-    temperature: 0.2,
+    //temperature: 0.2,
     stream: true,
 },  { signal });
 
@@ -90,7 +90,7 @@ REQUIREMENTS
 Mirror the user’s tone and language style naturally.
 
 Responses should be 1–2 sentences, under 35 words total.
-Keep it conversational and easy to say aloud.
+Keep it conversational and easy to say aloud. (IMPORTANT!!!)
 Avoid lists, code formatting, or Markdown. DO NOT USE LATEX. Everything should be formated so it can be read verbatim by tts.
 Never repeat details the assistant already mentioned.
 Vary rhythm and phrasing so each line feels fresh and flows from the previous one, as if part of a natural conversation.
