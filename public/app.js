@@ -12,10 +12,10 @@
   const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
   const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
   const VAD_THRESH = 0.020;            // Absolute minimum threshold (fallback)
-  const VAD_HANG_MS = 600;             // Debounce after last energy before "not speaking"
+  const VAD_HANG_MS = 1000;             // Debounce after last energy before "not speaking"
 
   // Turn auto-stop
-  const AUTO_STOP_SILENCE_MS = 1200;   // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_SILENCE_MS = 2000;   // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
   // Debug
