@@ -51,7 +51,7 @@ CONTENT
 `;
 
 // Helper: call GPT for reasoning with streamed tokens
-async function streamAnswer({ onToken, signal } = {}) {
+async function streamAnswer(chatID, { onToken, signal } = {}) {
 
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
@@ -109,7 +109,8 @@ Return only the short spoken-style summary text.
 
 function newChat(){
   const now = new Date();
-  const chatID = String(Math.floor(Math.random() * 10000));
+  const chatID = Math.floor(Math.random() * 1000000000000000).toString();
+  console.log(chatID);
   chats[chatID] = {};
   chats[chatID][0] = [
     { role: "system", content: Reasoning_SYSTEM_PROMPT },
@@ -177,7 +178,7 @@ app.get("/api/new_chat", (_req, res) => {
   try{
     let chatID = newChat();
     res.json({chatID});
-    console.log("ChatID is : " + toString(chatID))
+    console.log("ChatID is : " + chatID)
   }
   catch (e){
     console.error(e);
@@ -188,7 +189,7 @@ app.get("/api/new_chat", (_req, res) => {
 app.post("/api/message/stream", async (req, res) => {
   try {
     const { audioBase64, chatID } = req.body;
-    console.log("ChatID on post is : " + toString(chatID))
+    console.log("ChatID on post is : " + chatID)
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
     if (!chatID) return res.status(400).json({ error: "chatID required" });
 
@@ -279,7 +280,7 @@ app.get("/api/message/stream", async (req, res) => {
     let workloadPromises = {};
     let currentIndex = 0;
     let paragraphIndex = 0;
-    await streamAnswer({
+    await streamAnswer(chatID, {
       signal,
       onToken: async ({ token, text, done }) => {
         //console.log("running onToken");
