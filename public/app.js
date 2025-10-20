@@ -12,7 +12,7 @@
   const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
   const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
   const VAD_THRESH = 0.020;            // Absolute minimum threshold (fallback)
-  const VAD_HANG_MS = 1000;             // Debounce after last energy before "not speaking"
+  const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
 
   // Turn auto-stop
   const AUTO_STOP_SILENCE_MS = 2000;   // If silent this long while recording -> auto stop & send
@@ -363,6 +363,18 @@
       return;
     }
     await startVADFallback(); // start detection (does NOT start recording yet)
+
+    // Initialize Web Speech if available (used only to wake/interrupt quickly)
+    try {
+      if (!FORCE_VAD) {
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        if (SR) {
+          initSpeechRecognition(SR);
+          safeStartRecognition();
+        }
+      }
+    } catch {}
+
     voiceEnabled = true;
   }
   async function disableVoice() {
@@ -522,10 +534,15 @@
             talking = true;
             setStatusLabel("Speaking…");
 
-            // Voice onset → start recording if not already
-            if (!isRecording()) {
-              pauseRecognitionForRecording();
-              handleStartRecording().catch((e) => sLog("VAD start recording failed:", e));
+            // On voice onset, interrupt any current stream/tts and start a fresh recording.
+            try {
+              interruptAI();
+            } catch (e) {
+              sLog("Interrupt on VAD onset failed:", e);
+              if (!isRecording()) {
+                pauseRecognitionForRecording();
+                handleStartRecording().catch((err) => sLog("VAD start recording failed:", err));
+              }
             }
           }
         } else {
