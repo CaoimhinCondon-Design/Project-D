@@ -7,16 +7,24 @@
   const NEW_CHAT_ROUTE = "/api/new_chat";     // create chat IDs server-side
 
   // Voice detection config
-  const FORCE_VAD = false;             // Set true to skip Web Speech and always use VAD
+  const FORCE_VAD = true;              // Force VAD-only (prevents Web Speech false wakes/mis-lang)
+  const VOICE_LANG = "en-US";          // Language hint for SR if ever enabled
   const VAD_CALIBRATION_MS = 1500;     // Ambient calibration window
   const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
   const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
-  const VAD_THRESH = 0.004;            // Absolute minimum threshold (fallback)
+  const VAD_THRESH = 0.005;            // Absolute minimum threshold (fallback)
   const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
+  const VAD_START_CONFIRM_MS = 120;    // Must stay above threshold this long to confirm start
 
   // Turn auto-stop
   const AUTO_STOP_SILENCE_MS = 2000;   // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
+
+  // Minimum quality gates to prevent "silent Korean" uploads
+  const MIN_SPEECH_MS = 1000;          // Require at least 1s total utterance duration
+  const MIN_ACTIVE_SPEECH_MS = 400;    // Require ≥400ms actually above threshold
+  const MIN_SNR_DB = 7;                // Peak SNR vs ambient must exceed 7 dB
+  const MIN_PEAK_RMS = 0.010;          // Peak RMS must exceed this absolute value
 
   // Debug
   const STREAM_DEBUG = true;
@@ -89,6 +97,14 @@
   let lastSpeechTs = 0;
   let talking = false;
   let autoStopping = false;
+
+  // VAD stats for quality gating
+  let vadStats = {
+    calMean: 0,
+    peakRms: 0,
+    activeSpeechMs: 0
+  };
+  let startCandidateAt = 0;
 
   // Markdown / Code / Math
   let MD_READY = false;
@@ -364,7 +380,7 @@
     }
     await startVADFallback(); // start detection (does NOT start recording yet)
 
-    // Initialize Web Speech if available (used only to wake/interrupt quickly)
+    // Initialize Web Speech only if not forcing VAD
     try {
       if (!FORCE_VAD) {
         const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -395,12 +411,12 @@
   }
 
   // ==============================
-  // SpeechRecognition (not used for transcript; just wake/interrupt if ever enabled)
+  // SpeechRecognition (used only to wake/interrupt if enabled)
   // ==============================
   function initSpeechRecognition(SR) {
     if (recognition) return; // init once
     recognition = new SR();
-    recognition.lang = navigator.language || "en-US";
+    recognition.lang = VOICE_LANG;
     recognition.continuous = true;
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
@@ -500,6 +516,7 @@
       const calMean = calSamples.reduce((a, b) => a + b, 0) / Math.max(1, calSamples.length);
       const calVar = calSamples.reduce((acc, v) => acc + Math.pow(v - calMean, 2), 0) / Math.max(1, calSamples.length);
       const calStd = Math.sqrt(calVar);
+      vadStats.calMean = calMean;
       sLog("VAD calibrated:", { mean: calMean.toFixed(4), std: calStd.toFixed(4) });
 
       // ---- Loop ----
@@ -527,12 +544,20 @@
 
         const now = performance.now();
 
+        // --- START gating (require continuous above for VAD_START_CONFIRM_MS) ---
         if (emaRms > dynThresh) {
+          if (!startCandidateAt) startCandidateAt = now;
           lastAboveTs = now;
-          if (!speaking) {
+
+          // If not yet speaking, confirm start after continuous above-threshold window
+          if (!speaking && (now - startCandidateAt) >= VAD_START_CONFIRM_MS) {
             speaking = true;
             talking = true;
             setStatusLabel("Speaking…");
+
+            // Reset VAD quality counters at utterance start
+            vadStats.peakRms = 0;
+            vadStats.activeSpeechMs = 0;
 
             // On voice onset, interrupt any current stream/tts and start a fresh recording.
             try {
@@ -546,6 +571,7 @@
             }
           }
         } else {
+          startCandidateAt = 0; // reset start candidate when we drop below
           // only flip to not speaking after hang window
           if (speaking && (now - lastAboveTs > VAD_HANG_MS)) {
             speaking = false;
@@ -554,13 +580,25 @@
           }
         }
 
-        // Auto-stop logic if recording
+        // --- While recording, track quality metrics ---
         if (isRecording()) {
+          // Track peak RMS (use instantaneous, not EMA)
+          if (instRms > vadStats.peakRms) vadStats.peakRms = instRms;
+
+          // Accumulate time we are actually above threshold
+          if (emaRms > dynThresh) {
+            // Approximate per frame duration by RAF cadence (~16ms); more robust: use delta time
+            const dt = 1000 / 60; // ~16.7ms
+            vadStats.activeSpeechMs += dt;
+          }
+
           const recMs = now - recordingStartedAt;
           const silenceMs = now - lastAboveTs;
-          if (!autoStopping && recMs > AUTO_STOP_MIN_MS && silenceMs > AUTO_STOP_SILENCE_MS) {
+
+          // Require at least MIN_SPEECH_MS before auto-stop can fire
+          if (!autoStopping && recMs > Math.max(AUTO_STOP_MIN_MS, MIN_SPEECH_MS) && silenceMs > AUTO_STOP_SILENCE_MS) {
             autoStopping = true;
-            sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & send`);
+            sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & maybe send`);
             handleStopRecording().finally(() => {
               autoStopping = false;
               resumeRecognitionAfterRecording();
@@ -614,6 +652,10 @@
       recordingStartedAt = performance.now();
       lastSpeechTs = performance.now();
 
+      // Reset VAD stats for this take (keep calMean from calibration)
+      vadStats.peakRms = 0;
+      vadStats.activeSpeechMs = 0;
+
       mediaRecorder.addEventListener("dataavailable", ({ data }) => {
         if (data?.size) mediaChunks.push(data);
       });
@@ -647,6 +689,9 @@
     setButtonsState({ start: true, stop: true });
     setStatus("processing");
 
+    // snapshot when stop is requested so we can compute utterance duration
+    const stopCalledAt = performance.now();
+
     const stopPromise = mediaRecorder._stopPromise;
     mediaRecorder.stop();
 
@@ -657,6 +702,35 @@
 
     try {
       const blob = await stopPromise;
+
+      // Duration gate
+      const utteranceMs = stopCalledAt - recordingStartedAt;
+      if (utteranceMs < MIN_SPEECH_MS) {
+        sLog(`Discarding short utterance: ${Math.round(utteranceMs)}ms < ${MIN_SPEECH_MS}ms`);
+        setStatus("idle");
+        resetRecordingState();
+        if (voiceEnabled) resumeRecognitionAfterRecording();
+        return;
+      }
+
+      // Quality gates (prevent uploading near-silence)
+      const peak = vadStats.peakRms || 0;
+      const ambient = Math.max(vadStats.calMean || 0, 1e-6);
+      const snrDb = 20 * Math.log10(peak / ambient);
+      const activeOk = vadStats.activeSpeechMs >= MIN_ACTIVE_SPEECH_MS;
+      const peakOk = peak >= MIN_PEAK_RMS;
+      const snrOk = snrDb >= MIN_SNR_DB;
+
+      sLog(`VAD quality — peak=${peak.toFixed(4)} snrDb=${snrDb.toFixed(1)} activeMs=${Math.round(vadStats.activeSpeechMs)} (ok? p:${peakOk} snr:${snrOk} act:${activeOk})`);
+
+      if (!(activeOk && peakOk && snrOk)) {
+        sLog("Discarding due to failing quality gates (likely silence/noise).");
+        setStatus("idle");
+        resetRecordingState();
+        if (voiceEnabled) resumeRecognitionAfterRecording();
+        return;
+      }
+
       const audioBase64 = await blobToBase64(blob);
 
       const POST_TIMEOUT_MS = 30000;
