@@ -117,6 +117,7 @@ Return only the short spoken-style summary text.
 `;
 
 function newChat(){
+  const now = new Date();
   const chatID = toString(Math.floor(Math.random() * 10000)) + now.toISOString();
   chats[chatID] = {};
   chats[chatID][0] = [
@@ -125,7 +126,7 @@ function newChat(){
   chats[chatID][1] = [
     { role: "system", content: SUMMERY_SYSTEM_PROMPT },
   ];
-  chats[chatID][reasoningBuffer] = "";
+  chats[chatID].reasoningBuffer = "";
   return chatID;
 }
 
@@ -143,7 +144,7 @@ async function summarizeForSpeech(text, chatID, signal) {
     body: JSON.stringify({
       model: "gpt-4o-mini",
       temperature: 0.3,
-      messages: convo
+      messages: chats[chatID][1]
     })
   });
   if (!r.ok) throw new Error(await r.text());
@@ -193,7 +194,6 @@ app.get("/api/new_chat", (_req, res) => {
 })
 
 app.post("/api/message/stream", async (req, res) => {
-  currentConvoIndex = 0;
   try {
     const { audioBase64, chatID } = req.body;
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
@@ -228,12 +228,12 @@ app.get("/api/message/stream", async (req, res) => {
   const sendEvent = (event, payload) => {
     const trimedEvent = event.trim();
     if (trimedEvent == "answer"){
-      chats[chatID][reasoningBuffer] = ""; //reset reasoning buffer when we have full answer
+      chats[chatID].reasoningBuffer = ""; //reset reasoning buffer when we have full answer
       chats[chatID][0].push({ role: "assistant", content: payload.answer});
       chats[chatID][1].push({ role: "assistant", content: payload.answer});
     }
     if (trimedEvent == "token"){
-      chats[chatID][reasoningBuffer] = payload.text;
+      chats[chatID].reasoningBuffer = payload.text;
     }
     let info = ""
     if (trimedEvent == "status" && payload.stage){
@@ -249,6 +249,8 @@ app.get("/api/message/stream", async (req, res) => {
       await wait(10000)
     }
   }
+
+  currentConvoIndex = 0;
 
   async function workflow(paragraph, index, signal){
     while (currentConvoIndex !== index){await wait(1000)
