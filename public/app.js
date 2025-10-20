@@ -12,12 +12,12 @@
   const VAD_CALIBRATION_MS = 1500;     // Ambient calibration window
   const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
   const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
-  const VAD_THRESH = 0.005;            // Absolute minimum threshold (fallback)
+  const VAD_THRESH = 0.003;            // Absolute minimum threshold (fallback)
   const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
   const VAD_START_CONFIRM_MS = 120;    // Must stay above threshold this long to confirm start
 
   // Turn auto-stop
-  const AUTO_STOP_SILENCE_MS = 0;   // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_SILENCE_MS = 500;   // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
   // Minimum quality gates to prevent "silent Korean" uploads
