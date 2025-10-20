@@ -32,6 +32,7 @@
   //     }
   //   }
   // }
+
   function loadSession() {
     try { return JSON.parse(sessionStorage.getItem("pd_session")) || { currentChatID: null, chats: {} }; }
     catch { return { currentChatID: null, chats: {} }; }
@@ -134,10 +135,14 @@
   }
 
   // ==============================
-  // Audio queue for TTS clips
+  // Audio queue for TTS clips (ORDERED by paragraph index)
   // ==============================
   const audioQueue = [];
   let audioPlaying = false;
+
+  // Strict ordering state
+  let ttsNextIndex = 0;
+  const ttsPending = new Map(); // index -> dataUrl
 
   function enqueueAudio(dataUrl) {
     if (!dataUrl) return;
@@ -158,6 +163,32 @@
     audioPlaying = false;
     maybePlayNext();
   });
+
+  // Strictly-order TTS by the 'index' coming from server
+  function handleTtsChunk({ ttsDataUrl, index }) {
+    if (typeof index !== "number") {
+      // Fallback: if no index provided, just queue by arrival.
+      enqueueAudio(ttsDataUrl);
+      return;
+    }
+    ttsPending.set(index, ttsDataUrl);
+    flushTtsInOrder();
+  }
+
+  function flushTtsInOrder() {
+    while (ttsPending.has(ttsNextIndex)) {
+      const url = ttsPending.get(ttsNextIndex);
+      ttsPending.delete(ttsNextIndex);
+      enqueueAudio(url);
+      ttsNextIndex++;
+    }
+  }
+
+  // Reset ordering at new chat / new turn / interruption
+  function resetTtsOrdering() {
+    ttsPending.clear();
+    ttsNextIndex = 0;
+  }
 
   // ==============================
   // Init
@@ -205,6 +236,7 @@
     renderMessages();
     renderChatList();
     updateAudio(audioEl, null);
+    resetTtsOrdering(); // ensure no old TTS clips bleed in
     setStatus("idle");
   }
 
@@ -629,9 +661,11 @@
       appendMessageBubble("assistant", "");
       scrollMessagesToBottom();
 
+      // Clear any previous TTS and reset ordered playback for this turn
       audioQueue.length = 0;
       audioPlaying = false;
       updateAudio(audioEl, null);
+      resetTtsOrdering(); // NEW
 
       await openEventStream();
       setStatus("done");
@@ -780,7 +814,10 @@
       es.addEventListener("finishedParagraph", (e) => {
         bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.ttsDataUrl) enqueueAudio(data.ttsDataUrl);
+        if (data?.ttsDataUrl) {
+          // ORDERED enqueue: will only play when previous indexes are flushed
+          handleTtsChunk({ ttsDataUrl: data.ttsDataUrl, index: data.index });
+        }
       });
 
       es.addEventListener("done", () => {
@@ -843,6 +880,11 @@
       try { window.dispatchEvent(new CustomEvent(SSE_FORCE_EVENT)); } catch {}
       sLog("SSE: force-closed (" + reason + ")");
     }
+    // also clear any queued audio so we don't play stale clips
+    audioQueue.length = 0;
+    audioPlaying = false;
+    updateAudio(audioEl, null);
+    resetTtsOrdering(); // NEW
   }
 
   // ==============================
