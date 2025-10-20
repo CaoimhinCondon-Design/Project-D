@@ -7,11 +7,16 @@
   const NEW_CHAT_ROUTE = "/api/new_chat";     // create chat IDs server-side
 
   // Voice detection config
-  const FORCE_VAD = false;            // Set true to skip Web Speech and always use VAD
-  const VAD_THRESH = 0.08;            // Voice activity RMS threshold (raise if too sensitive)
-  const VAD_HANG_MS = 400;            // Hangover to avoid flapping during short pauses
-  const AUTO_STOP_SILENCE_MS = 1200;  // If silent this long while recording -> auto stop & send
-  const AUTO_STOP_MIN_MS = 500;       // Don't auto-stop before at least this much audio is captured
+  const FORCE_VAD = false;             // Set true to skip Web Speech and always use VAD
+  const VAD_CALIBRATION_MS = 1500;     // Ambient calibration window
+  const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
+  const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
+  const VAD_THRESH = 0.020;            // Absolute minimum threshold (fallback)
+  const VAD_HANG_MS = 600;             // Debounce after last energy before "not speaking"
+
+  // Turn auto-stop
+  const AUTO_STOP_SILENCE_MS = 1200;   // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
   // Debug
   const STREAM_DEBUG = true;
@@ -22,17 +27,6 @@
   // ==============================
   // Session (multi-chat, per tab)
   // ==============================
-  // session shape:
-  // {
-  //   currentChatID: string|null,
-  //   chats: {
-  //     [id]: {
-  //       id, title, createdAt, lastUpdatedAt,
-  //       messages: [{role:"user"|"assistant", content:string}]
-  //     }
-  //   }
-  // }
-
   function loadSession() {
     try { return JSON.parse(sessionStorage.getItem("pd_session")) || { currentChatID: null, chats: {} }; }
     catch { return { currentChatID: null, chats: {} }; }
@@ -135,21 +129,31 @@
   }
 
   // ==============================
-  // Audio queue for TTS clips (ORDERED by paragraph index)
+  // Audio queue for TTS clips (ordered)
   // ==============================
   const audioQueue = [];
   let audioPlaying = false;
+  let nextTtsIndex = 0;
+  const ttsBuffer = new Map(); // index -> dataUrl
 
-  // Strict ordering state
-  let ttsNextIndex = 0;
-  const ttsPending = new Map(); // index -> dataUrl
-
+  function enqueueAudioOrdered(index, dataUrl) {
+    if (!dataUrl) return;
+    ttsBuffer.set(index, dataUrl);
+    maybeFlushTtsBuffer();
+  }
+  function maybeFlushTtsBuffer() {
+    while (ttsBuffer.has(nextTtsIndex)) {
+      audioQueue.push(ttsBuffer.get(nextTtsIndex));
+      ttsBuffer.delete(nextTtsIndex);
+      nextTtsIndex++;
+    }
+    maybePlayNext();
+  }
   function enqueueAudio(dataUrl) {
     if (!dataUrl) return;
     audioQueue.push(dataUrl);
     maybePlayNext();
   }
-
   function maybePlayNext() {
     if (audioPlaying) return;
     const next = audioQueue.shift();
@@ -158,37 +162,47 @@
     updateAudio(audioEl, next);
     audioEl.play().catch(() => {});
   }
-
   audioEl.addEventListener("ended", () => {
     audioPlaying = false;
     maybePlayNext();
   });
 
-  // Strictly-order TTS by the 'index' coming from server
-  function handleTtsChunk({ ttsDataUrl, index }) {
-    if (typeof index !== "number") {
-      // Fallback: if no index provided, just queue by arrival.
-      enqueueAudio(ttsDataUrl);
-      return;
-    }
-    ttsPending.set(index, ttsDataUrl);
-    flushTtsInOrder();
-  }
+  // ==============================
+  // RMS/VAD Visualizer (debug)
+  // ==============================
+  let rmsMeterEl, rmsCanvas, rmsCtx;
+  function initRmsMeter() {
+    // container
+    rmsMeterEl = document.createElement("div");
+    rmsMeterEl.id = "rmsMeter";
+    rmsMeterEl.style.cssText = `
+      position: fixed; bottom: 1rem; right: 1rem;
+      background: rgba(0,0,0,0.75); color: #0f0;
+      font-family: monospace; padding: 6px 10px;
+      border-radius: 6px; z-index: 9999; font-size: 13px;
+      user-select: none;
+    `;
+    rmsMeterEl.textContent = "RMS: --";
+    document.body.appendChild(rmsMeterEl);
 
-  function flushTtsInOrder() {
-    while (ttsPending.has(ttsNextIndex)) {
-      const url = ttsPending.get(ttsNextIndex);
-      ttsPending.delete(ttsNextIndex);
-      enqueueAudio(url);
-      ttsNextIndex++;
+    // tiny bar
+    rmsCanvas = document.createElement("canvas");
+    rmsCanvas.width = 120; rmsCanvas.height = 12;
+    rmsCanvas.style.cssText = "display:block;margin-top:4px;background:#222;";
+    rmsMeterEl.appendChild(rmsCanvas);
+    rmsCtx = rmsCanvas.getContext("2d");
+  }
+  function updateRmsMeter(value, threshold) {
+    if (!rmsMeterEl) return;
+    rmsMeterEl.firstChild.nodeValue = `RMS: ${value.toFixed(4)} (thr ${threshold.toFixed(4)})`;
+    if (rmsCtx) {
+      rmsCtx.clearRect(0, 0, rmsCanvas.width, rmsCanvas.height);
+      const w = Math.max(0, Math.min(rmsCanvas.width, value * rmsCanvas.width * 20));
+      rmsCtx.fillStyle = value > threshold ? "#0f0" : "#555";
+      rmsCtx.fillRect(0, 0, w, rmsCanvas.height);
     }
   }
-
-  // Reset ordering at new chat / new turn / interruption
-  function resetTtsOrdering() {
-    ttsPending.clear();
-    ttsNextIndex = 0;
-  }
+  initRmsMeter();
 
   // ==============================
   // Init
@@ -196,9 +210,9 @@
   setStatus("idle");
   resetRecordingState();
 
-  // core controls
-  startBtn.addEventListener("click", handleStartToggle);
-  stopBtn.addEventListener("click", handleStopRecording);
+  // core controls (manual buttons still supported)
+  startBtn?.addEventListener("click", handleStartToggle);
+  stopBtn?.addEventListener("click", handleStopRecording);
   attachVoiceToggle();
 
   // chat controls
@@ -236,8 +250,10 @@
     renderMessages();
     renderChatList();
     updateAudio(audioEl, null);
-    resetTtsOrdering(); // ensure no old TTS clips bleed in
     setStatus("idle");
+    nextTtsIndex = 0;
+    audioQueue.length = 0;
+    audioPlaying = false;
   }
 
   async function deleteCurrentChat() {
@@ -265,6 +281,9 @@
     renderMessages();
     renderChatList();
     setStatus("idle");
+    nextTtsIndex = 0;
+    audioQueue.length = 0;
+    audioPlaying = false;
   }
 
   // Sidebar rendering
@@ -286,35 +305,27 @@
       chatListEl.appendChild(item);
     });
   }
-
   function renderChatHeader() {
     const c = getCurrentChat();
-    chatTitleEl.textContent = c?.title || "Project David";
+    if (chatTitleEl) chatTitleEl.textContent = c?.title || "Project David";
   }
-
   function renderMessages() {
     const c = getCurrentChat();
+    if (!messagesEl) return;
     messagesEl.innerHTML = "";
     const msgs = c?.messages || [];
     for (const m of msgs) appendMessageBubble(m.role, m.content);
     scrollMessagesToBottom();
   }
-
   function appendMessageBubble(role, content) {
     const wrap = document.createElement("div");
     wrap.className = `msg msg--${role}`;
-
     const bubble = document.createElement("div");
     bubble.className = "msg__bubble";
     wrap.appendChild(bubble);
-
-    // Render markdown into the bubble
     renderMarkdownInto(bubble, content);
-
     messagesEl.appendChild(wrap);
   }
-
-  // Streaming-safe update for the *last* assistant bubble
   function updateLastAssistantBubble(text) {
     const nodes = messagesEl.querySelectorAll(".msg--assistant .msg__bubble");
     const target = nodes[nodes.length - 1];
@@ -324,7 +335,6 @@
     }
     renderMarkdownInto(target, text || "");
   }
-
   function scrollMessagesToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -345,7 +355,6 @@
       updateVoiceToggleUi();
     });
   }
-
   async function enableVoice() {
     try {
       await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -353,42 +362,20 @@
       alert("Please allow microphone access to enable Voice mode.");
       return;
     }
-
-    await startVADFallback();
-
-    if (FORCE_VAD) {
-      sLog("Voice: enabling VAD only (FORCE_VAD)");
-      voiceEnabled = true;
-      return;
-    }
-
-    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SR) {
-      sLog("Voice: SR unavailable → using VAD only");
-      voiceEnabled = true;
-      return;
-    }
-
-    initSpeechRecognition(SR);
-    safeStartRecognition();
+    await startVADFallback(); // start detection (does NOT start recording yet)
     voiceEnabled = true;
   }
-
   async function disableVoice() {
-    sLog("Voice: disabling");
     voiceEnabled = false;
-
     if (recognition) {
       recognitionManuallyPaused = true;
       try { recognition.stop(); } catch {}
     }
-
     if (typeof vadStopFn === "function") {
       try { vadStopFn(); } catch {}
       vadStopFn = null;
     }
   }
-
   function updateVoiceToggleUi() {
     if (!voiceToggleBtn) return;
     voiceToggleBtn.textContent = voiceEnabled ? "Disable Voice" : "Enable Voice";
@@ -396,7 +383,7 @@
   }
 
   // ==============================
-  // SpeechRecognition (wake/interrupt)
+  // SpeechRecognition (not used for transcript; just wake/interrupt if ever enabled)
   // ==============================
   function initSpeechRecognition(SR) {
     if (recognition) return; // init once
@@ -406,29 +393,21 @@
     recognition.interimResults = false;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => {
-      recognitionRunning = true;
-      sLog("SpeechRecognition started");
-    };
-
+    recognition.onstart = () => { recognitionRunning = true; sLog("SpeechRecognition started"); };
     recognition.onend = () => {
       recognitionRunning = false;
       sLog("SpeechRecognition ended; manuallyPaused?", recognitionManuallyPaused);
       if (voiceEnabled && !recognitionManuallyPaused) setTimeout(safeStartRecognition, 600);
     };
-
     recognition.onaudiostart = () => {
       if (!voiceEnabled) return;
       sLog("SR onaudiostart → interrupt AI");
       interruptAI();
     };
-
     recognition.onresult = () => {};
-
     recognition.onerror = (e) => {
       const err = e?.error;
       sLog("SpeechRecognition error:", err);
-
       if (err === "network") {
         const now = Date.now();
         if (!srErrorWindowStart || now - srErrorWindowStart > SR_ERROR_WINDOW_MS) {
@@ -442,31 +421,26 @@
           try { recognition.stop(); } catch {}
         }
       }
-
       if (err === "not-allowed" || err === "service-not-allowed") {
         recognitionManuallyPaused = true;
         try { recognition.stop(); } catch {}
       }
     };
-
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible" && voiceEnabled && !recognitionManuallyPaused) {
         safeStartRecognition();
       }
     });
   }
-
   function safeStartRecognition() {
     if (!recognition || recognitionRunning) return;
     try { recognition.start(); } catch {}
   }
-
   function pauseRecognitionForRecording() {
     if (!recognition || !voiceEnabled) return;
     recognitionManuallyPaused = true;
     if (recognitionRunning) { try { recognition.stop(); } catch {} }
   }
-
   function resumeRecognitionAfterRecording() {
     if (!recognition || !voiceEnabled) return;
     recognitionManuallyPaused = false;
@@ -474,12 +448,22 @@
   }
 
   // ==============================
-  // VAD (also handles end-of-speech auto-stop)
+  // VAD (auto start/stop recording)
   // ==============================
   async function startVADFallback() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          noiseSuppression: false,
+          echoCancellation: false,
+          autoGainControl: false
+        }
+      });
+
       const ac = new (window.AudioContext || window.webkitAudioContext)();
+      if (ac.state === "suspended") {
+        try { await ac.resume(); } catch {}
+      }
       const src = ac.createMediaStreamSource(stream);
       const analyser = ac.createAnalyser();
       analyser.fftSize = 2048;
@@ -487,38 +471,76 @@
 
       const buf = new Float32Array(analyser.fftSize);
 
-      sLog("VAD running (handles auto-stop on silence)");
-      let rafId = 0;
+      sLog("VAD starting (with calibration)...");
+      setStatusLabel("Listening…");
 
-      function loop() {
-        if (!voiceEnabled) return;
+      // ---- Calibration for ambient ----
+      let calSamples = [];
+      const calStart = performance.now();
+      while (performance.now() - calStart < VAD_CALIBRATION_MS) {
         analyser.getFloatTimeDomainData(buf);
-
         let sum = 0;
         for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
         const rms = Math.sqrt(sum / buf.length);
+        calSamples.push(rms);
+        await new Promise(r => requestAnimationFrame(r));
+      }
+      const calMean = calSamples.reduce((a, b) => a + b, 0) / Math.max(1, calSamples.length);
+      const calVar = calSamples.reduce((acc, v) => acc + Math.pow(v - calMean, 2), 0) / Math.max(1, calSamples.length);
+      const calStd = Math.sqrt(calVar);
+      sLog("VAD calibrated:", { mean: calMean.toFixed(4), std: calStd.toFixed(4) });
+
+      // ---- Loop ----
+      let emaRms = calMean;
+      let lastAboveTs = 0;
+      let speaking = false;
+
+      let rafId = 0;
+      function loop() {
+        if (!voiceEnabled) return;
+
+        analyser.getFloatTimeDomainData(buf);
+        let sum = 0;
+        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+        const instRms = Math.sqrt(sum / buf.length);
+
+        // EMA smoothing
+        emaRms = VAD_RMS_SMOOTH * instRms + (1 - VAD_RMS_SMOOTH) * emaRms;
+
+        // Dynamic threshold
+        const dynThresh = Math.max(calMean + VAD_STD_K * calStd, VAD_THRESH);
+
+        // Update visualizer
+        updateRmsMeter(emaRms, dynThresh);
+
         const now = performance.now();
 
-        if (rms > VAD_THRESH) {
-          lastSpeechTs = now;
-          if (!talking) {
+        if (emaRms > dynThresh) {
+          lastAboveTs = now;
+          if (!speaking) {
+            speaking = true;
             talking = true;
-            sLog("VAD speech start");
-            interruptAI();
+            setStatusLabel("Speaking…");
+
+            // Voice onset → start recording if not already
             if (!isRecording()) {
               pauseRecognitionForRecording();
               handleStartRecording().catch((e) => sLog("VAD start recording failed:", e));
             }
           }
         } else {
-          if (talking && now - lastSpeechTs > VAD_HANG_MS) {
+          // only flip to not speaking after hang window
+          if (speaking && (now - lastAboveTs > VAD_HANG_MS)) {
+            speaking = false;
             talking = false;
+            setStatusLabel("Listening…");
           }
         }
 
+        // Auto-stop logic if recording
         if (isRecording()) {
           const recMs = now - recordingStartedAt;
-          const silenceMs = now - lastSpeechTs;
+          const silenceMs = now - lastAboveTs;
           if (!autoStopping && recMs > AUTO_STOP_MIN_MS && silenceMs > AUTO_STOP_SILENCE_MS) {
             autoStopping = true;
             sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & send`);
@@ -531,15 +553,19 @@
 
         rafId = requestAnimationFrame(loop);
       }
-      loop();
+      rafId = requestAnimationFrame(loop);
 
       vadStopFn = () => {
         cancelAnimationFrame(rafId);
         try { ac.close(); } catch {}
         try { stream.getTracks().forEach(t => t.stop()); } catch {}
+        setStatus("idle");
+        updateRmsMeter(0, 0);
       };
+
     } catch (e) {
       sLog("VAD init failed:", e);
+      alert("Failed to initialize Voice Activity Detection. Check mic permissions.");
     }
   }
 
@@ -661,11 +687,12 @@
       appendMessageBubble("assistant", "");
       scrollMessagesToBottom();
 
-      // Clear any previous TTS and reset ordered playback for this turn
+      // reset audio queue before new TTS
       audioQueue.length = 0;
       audioPlaying = false;
       updateAudio(audioEl, null);
-      resetTtsOrdering(); // NEW
+      nextTtsIndex = 0;
+      ttsBuffer.clear?.();
 
       await openEventStream();
       setStatus("done");
@@ -687,18 +714,14 @@
     try {
       if (isRecording()) mediaRecorder.stop();
     } catch {}
-
     if (activeStream) {
       try { activeStream.getTracks().forEach((t) => t.stop()); } catch {}
       activeStream = null;
     }
-
     mediaRecorder = null;
     mediaChunks = [];
-
     if (voiceEnabled) resumeRecognitionAfterRecording();
   }
-
   function isRecording() {
     return mediaRecorder && mediaRecorder.state === "recording";
   }
@@ -730,7 +753,6 @@
         try { clearInterval(watchdog); } catch {}
         try { window.removeEventListener(SSE_FORCE_EVENT, onForcedClose); } catch {}
       }
-
       function end(ok, why = "") {
         if (resolved) return;
         resolved = true;
@@ -740,7 +762,6 @@
         sLog(`SSE ended ok=${ok} ${why ? "(" + why + ")" : ""}`);
         ok ? resolve() : reject(new Error("SSE error: " + why));
       }
-
       function bumpActivity() { lastActivity = Date.now(); }
 
       const onForcedClose = () => end(true, "externally_closed");
@@ -764,14 +785,12 @@
       };
 
       es.addEventListener("open", () => { bumpActivity(); });
-
       es.addEventListener("status", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
       es.addEventListener("subStatus", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
 
       es.addEventListener("token", (e) => {
         bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
-        // streaming tokens: update UI and snapshot
         if (typeof data?.text === "string") {
           lastAnswerText = data.text;
         } else if (typeof data?.token === "string") {
@@ -781,14 +800,12 @@
 
         const c = getCurrentChat();
         const msgs = [...(c.messages || [])];
-        // ensure there is an assistant message at the end to replace
         if (!msgs.length || msgs[msgs.length - 1].role !== "assistant") {
           msgs.push({ role: "assistant", content: lastAnswerText });
         } else {
           msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
         }
         upsertChat(state.currentChatID, { messages: msgs });
-
         scrollMessagesToBottom();
       });
 
@@ -807,16 +824,17 @@
           msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
         }
         upsertChat(state.currentChatID, { messages: msgs });
-
         scrollMessagesToBottom();
       });
 
       es.addEventListener("finishedParagraph", (e) => {
         bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
-        if (data?.ttsDataUrl) {
-          // ORDERED enqueue: will only play when previous indexes are flushed
-          handleTtsChunk({ ttsDataUrl: data.ttsDataUrl, index: data.index });
+        // ordered enqueue if server sends index
+        if (Number.isInteger(data?.index)) {
+          enqueueAudioOrdered(data.index, data.ttsDataUrl);
+        } else if (data?.ttsDataUrl) {
+          enqueueAudio(data.ttsDataUrl);
         }
       });
 
@@ -828,7 +846,6 @@
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
-          // render an error bubble
           appendMessageBubble("assistant", `**Error:** ${payload.message}`);
           setStatus("error");
           end(false, "server_error_event");
@@ -860,7 +877,6 @@
     } catch {}
 
     forceCloseSSE("interrupt");
-
     setStatusLabel("Listening…");
 
     if (!isRecording()) {
@@ -872,7 +888,6 @@
       interrupting = false;
     }
   }
-
   function forceCloseSSE(reason = "client_close") {
     if (currentEventSource) {
       try { currentEventSource.close(); } catch {}
@@ -880,11 +895,6 @@
       try { window.dispatchEvent(new CustomEvent(SSE_FORCE_EVENT)); } catch {}
       sLog("SSE: force-closed (" + reason + ")");
     }
-    // also clear any queued audio so we don't play stale clips
-    audioQueue.length = 0;
-    audioPlaying = false;
-    updateAudio(audioEl, null);
-    resetTtsOrdering(); // NEW
   }
 
   // ==============================
@@ -942,7 +952,6 @@
     link.setAttribute("data-key", key);
     document.head.appendChild(link);
   }
-
   function loadScriptOnce(src, key) {
     return new Promise((resolve, reject) => {
       if (document.querySelector(`script[data-key="${key}"]`)) return resolve();
@@ -955,7 +964,6 @@
       document.head.appendChild(s);
     });
   }
-
   async function loadScriptWithFallback(urls, key, timeoutMs = 8000) {
     for (const url of urls) {
       try {
@@ -968,11 +976,9 @@
     }
     return false;
   }
-
   function normalizeFences(md) {
     return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
-
   async function ensureMarkdown() {
     if (MD_READY) return;
     if (!window.marked) {
@@ -1002,7 +1008,6 @@
     }
     MD_READY = true;
   }
-
   async function ensureHighlighting() {
     if (HL_READY) return;
     loadCssOnce("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css", "hljs-theme")
@@ -1017,7 +1022,6 @@
     );
     HL_READY = !!window.hljs;
   }
-
   async function ensureKatex() {
     if (KATEX_READY && window.katex && window.renderMathInElement) return;
     loadCssOnce("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", "katex-css")
@@ -1052,7 +1056,6 @@
   function safeParse(s) {
     try { return JSON.parse(s); } catch { return null; }
   }
-
   function updateAudio(el, dataUrl) {
     if (dataUrl) {
       el.src = dataUrl;
@@ -1065,30 +1068,27 @@
       el.load();
     }
   }
-
   function setButtonsState({ start, stop }) {
-    startBtn.disabled = !!start;
-    stopBtn.disabled = !!stop;
+    startBtn && (startBtn.disabled = !!start);
+    stopBtn && (stopBtn.disabled = !!stop);
   }
-
   function setStatus(state) {
+    if (!statusEl) return;
     const label = statusLabels[state] ?? statusLabels.idle;
     statusEl.dataset.state = state;
     statusEl.textContent = label;
   }
-
   function setStatusLabel(text) {
+    if (!statusEl) return;
     statusEl.dataset.state = "processing";
     statusEl.textContent = text;
   }
-
   function resetRecordingState() {
     setButtonsState({ start: false, stop: true });
     mediaRecorder = null;
     mediaChunks = [];
     if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
   }
-
   async function blobToBase64(blob) {
     const buffer = await blob.arrayBuffer();
     let binary = "";
