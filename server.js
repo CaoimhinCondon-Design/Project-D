@@ -51,7 +51,7 @@ CONTENT
 `;
 
 // Helper: call GPT for reasoning with streamed tokens
-async function streamAnswer(prompt, { onToken, signal } = {}) {
+async function streamAnswer({ onToken, signal } = {}) {
 
   const safeOnToken = typeof onToken === "function" ? onToken : null;
   let streamClosed = false;
@@ -60,16 +60,7 @@ async function streamAnswer(prompt, { onToken, signal } = {}) {
 
   const stream = await client.responses.create({
     model: "gpt-4o-mini",
-    input: [
-        {
-            role: "system",
-            content: SYSTEM_PROMPT,
-        },
-        {
-            role: "user",
-            content: prompt,
-        },
-    ],
+    input: chats[chatID][0],
     temperature: 0.2,
     stream: true,
 },  { signal });
@@ -118,7 +109,7 @@ Return only the short spoken-style summary text.
 
 function newChat(){
   const now = new Date();
-  const chatID = toString(Math.floor(Math.random() * 10000)) + now.toISOString();
+  const chatID = String(Math.floor(Math.random() * 10000));
   chats[chatID] = {};
   chats[chatID][0] = [
     { role: "system", content: Reasoning_SYSTEM_PROMPT },
@@ -186,6 +177,7 @@ app.get("/api/new_chat", (_req, res) => {
   try{
     let chatID = newChat();
     res.json({chatID});
+    console.log("ChatID is : " + toString(chatID))
   }
   catch (e){
     console.error(e);
@@ -196,6 +188,7 @@ app.get("/api/new_chat", (_req, res) => {
 app.post("/api/message/stream", async (req, res) => {
   try {
     const { audioBase64, chatID } = req.body;
+    console.log("ChatID on post is : " + toString(chatID))
     if (!audioBase64) return res.status(400).json({ error: "audioBase64 required" });
     if (!chatID) return res.status(400).json({ error: "chatID required" });
 
@@ -250,7 +243,7 @@ app.get("/api/message/stream", async (req, res) => {
     }
   }
 
-  currentConvoIndex = 0;
+  let currentConvoIndex = 0;
 
   async function workflow(paragraph, index, signal){
     while (currentConvoIndex !== index){await wait(1000)
@@ -286,7 +279,7 @@ app.get("/api/message/stream", async (req, res) => {
     let workloadPromises = {};
     let currentIndex = 0;
     let paragraphIndex = 0;
-    await streamAnswer(transcript, {
+    await streamAnswer({
       signal,
       onToken: async ({ token, text, done }) => {
         //console.log("running onToken");
