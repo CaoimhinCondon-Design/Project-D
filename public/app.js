@@ -11,7 +11,7 @@
   const VAD_CALIBRATION_MS = 1500;     // Ambient calibration window
   const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
   const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
-  const VAD_THRESH = 0.020;            // Absolute minimum threshold (fallback)
+  const VAD_THRESH = 0.004;            // Absolute minimum threshold (fallback)
   const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
 
   // Turn auto-stop
