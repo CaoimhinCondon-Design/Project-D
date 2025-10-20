@@ -286,7 +286,7 @@ app.get("/api/message/stream", async (req, res) => {
         //console.log("running onToken");
         if (streamClosed) return;
         //console.log("still running");
-        paragraphs = text.split(/\n/);
+        paragraphs = text.split(/\n\n/);
         while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
           const p = paragraphs[currentIndex].trim();
           if (p) {
