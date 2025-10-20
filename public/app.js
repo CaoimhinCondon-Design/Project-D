@@ -16,7 +16,7 @@
   // Debug
   const STREAM_DEBUG = true;
 
-  // Custom event name to signal forced SSE close (so promises resolve cleanly)
+  // SSE forced close event
   const SSE_FORCE_EVENT = "SSE_FORCE_CLOSE";
 
   // ==============================
@@ -28,7 +28,7 @@
   //   chats: {
   //     [id]: {
   //       id, title, createdAt, lastUpdatedAt,
-  //       lastTranscript, lastAnswer
+  //       messages: [{role:"user"|"assistant", content:string}]
   //     }
   //   }
   // }
@@ -38,18 +38,17 @@
   }
   function saveSession(next) {
     sessionStorage.setItem("pd_session", JSON.stringify(next));
-    renderChatSelect();
+    renderChatList();
   }
   let state = loadSession();
 
-  function upsertChatSnapshot(id, patch) {
+  function upsertChat(id, patch = {}) {
     const prev = state.chats[id] || {
       id,
       title: `Chat ${id.slice(-4)}`,
       createdAt: Date.now(),
       lastUpdatedAt: Date.now(),
-      lastTranscript: "",
-      lastAnswer: ""
+      messages: []
     };
     const next = { ...prev, ...patch, lastUpdatedAt: Date.now() };
     state.chats[id] = next;
@@ -104,18 +103,18 @@
   // ==============================
   // UI refs
   // ==============================
+  const statusEl = document.getElementById("status");
   const startBtn = document.getElementById("startBtn");
   const stopBtn = document.getElementById("stopBtn");
-  const statusEl = document.getElementById("status");
-  let transcriptEl = document.getElementById("transcript");
-  let answerEl = document.getElementById("answer");
+  const voiceToggleBtn = document.getElementById("voiceToggle");
   const audioEl = document.getElementById("audio");
-  const voiceToggleBtn = document.getElementById("voiceToggle"); // optional
 
-  // multi-chat controls
+  // Chat UI
+  const chatTitleEl = document.getElementById("chatTitle");
+  const chatListEl = document.getElementById("chatList");
+  const messagesEl = document.getElementById("messages");
   const newChatBtn = document.getElementById("newChatBtn");
   const deleteChatBtn = document.getElementById("deleteChatBtn");
-  const chatSelectEl = document.getElementById("chatSelect");
 
   const statusLabels = {
     idle: "Idle",
@@ -164,32 +163,25 @@
   // Init
   // ==============================
   setStatus("idle");
-  updateCardBody(transcriptEl, "");
-  updateCardBody(answerEl, "");
   resetRecordingState();
 
-  // wire core controls
+  // core controls
   startBtn.addEventListener("click", handleStartToggle);
   stopBtn.addEventListener("click", handleStopRecording);
   attachVoiceToggle();
 
-  // wire chat controls
+  // chat controls
   newChatBtn?.addEventListener("click", newChat);
   deleteChatBtn?.addEventListener("click", deleteCurrentChat);
-  chatSelectEl?.addEventListener("change", (e) => switchChat(e.target.value));
 
   // ensure we have a chat on boot
   (async () => {
     if (!state.currentChatID) {
-      await newChat(); // creates on server + selects it
+      await newChat();
     } else {
-      // restore UI from snapshot
-      const c = getCurrentChat();
-      if (c) {
-        await updateCardBody(transcriptEl, c.lastTranscript || "");
-        await updateCardBody(answerEl, c.lastAnswer || "");
-      }
-      renderChatSelect();
+      renderChatHeader();
+      renderMessages();
+      renderChatList();
     }
   })().catch(console.error);
 
@@ -207,40 +199,13 @@
   async function newChat() {
     forceCloseSSE("new_chat");
     const id = await ensureServerChat();
-    upsertChatSnapshot(id, { id });
+    upsertChat(id, { id, title: "New Chat", messages: [] });
     setCurrentChat(id);
-    renderChatSelect();
-    // clear UI for the new chat
-    await updateCardBody(transcriptEl, "");
-    await updateCardBody(answerEl, "");
+    renderChatHeader();
+    renderMessages();
+    renderChatList();
     updateAudio(audioEl, null);
     setStatus("idle");
-  }
-
-  function renderChatSelect() {
-    if (!chatSelectEl) return;
-    const ids = Object.keys(state.chats)
-      .sort((a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0));
-    chatSelectEl.innerHTML = "";
-    ids.forEach((id) => {
-      const opt = document.createElement("option");
-      const c = state.chats[id];
-      opt.value = id;
-      opt.textContent = c.title || id;
-      if (id === state.currentChatID) opt.selected = true;
-      chatSelectEl.appendChild(opt);
-    });
-  }
-
-  async function switchChat(id) {
-    if (!id || !state.chats[id]) return;
-    forceCloseSSE("switch_chat");
-    setCurrentChat(id);
-    const c = state.chats[id];
-    await updateCardBody(transcriptEl, c.lastTranscript || "");
-    await updateCardBody(answerEl, c.lastAnswer || "");
-    setStatus("idle");
-    renderChatSelect();
   }
 
   async function deleteCurrentChat() {
@@ -250,7 +215,9 @@
     delete state.chats[id];
     state.currentChatID = null;
     saveSession(state);
-    const remaining = Object.keys(state.chats);
+    const remaining = Object.keys(state.chats).sort(
+      (a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0)
+    );
     if (remaining.length === 0) {
       await newChat();
     } else {
@@ -258,11 +225,83 @@
     }
   }
 
+  async function switchChat(id) {
+    if (!id || !state.chats[id]) return;
+    forceCloseSSE("switch_chat");
+    setCurrentChat(id);
+    renderChatHeader();
+    renderMessages();
+    renderChatList();
+    setStatus("idle");
+  }
+
+  // Sidebar rendering
+  function renderChatList() {
+    if (!chatListEl) return;
+    const ids = Object.keys(state.chats).sort(
+      (a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0)
+    );
+    chatListEl.innerHTML = "";
+    ids.forEach((id) => {
+      const c = state.chats[id];
+      const item = document.createElement("button");
+      item.className = "chat-list__item";
+      item.type = "button";
+      item.setAttribute("data-chatid", id);
+      item.setAttribute("aria-current", id === state.currentChatID ? "true" : "false");
+      item.textContent = c.title || id;
+      item.addEventListener("click", () => switchChat(id));
+      chatListEl.appendChild(item);
+    });
+  }
+
+  function renderChatHeader() {
+    const c = getCurrentChat();
+    chatTitleEl.textContent = c?.title || "Project David";
+  }
+
+  function renderMessages() {
+    const c = getCurrentChat();
+    messagesEl.innerHTML = "";
+    const msgs = c?.messages || [];
+    for (const m of msgs) appendMessageBubble(m.role, m.content);
+    scrollMessagesToBottom();
+  }
+
+  function appendMessageBubble(role, content) {
+    const wrap = document.createElement("div");
+    wrap.className = `msg msg--${role}`;
+
+    const bubble = document.createElement("div");
+    bubble.className = "msg__bubble";
+    wrap.appendChild(bubble);
+
+    // Render markdown into the bubble
+    renderMarkdownInto(bubble, content);
+
+    messagesEl.appendChild(wrap);
+  }
+
+  // Streaming-safe update for the *last* assistant bubble
+  function updateLastAssistantBubble(text) {
+    const nodes = messagesEl.querySelectorAll(".msg--assistant .msg__bubble");
+    const target = nodes[nodes.length - 1];
+    if (!target) {
+      appendMessageBubble("assistant", text || "");
+      return;
+    }
+    renderMarkdownInto(target, text || "");
+  }
+
+  function scrollMessagesToBottom() {
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
   // ==============================
   // Voice toggle (SR with VAD fallback)
   // ==============================
   function attachVoiceToggle() {
-    if (!voiceToggleBtn) return; // if no button present, quietly skip
+    if (!voiceToggleBtn) return;
     updateVoiceToggleUi();
 
     voiceToggleBtn.addEventListener("click", async () => {
@@ -551,7 +590,7 @@
 
       let postRes;
       try {
-        // 🔴 include chatID with POST
+        // include chatID with POST
         postRes = await fetch(STREAM_ROUTE, {
           method: "POST",
           headers: {
@@ -574,9 +613,21 @@
 
       const { transcript } = await postRes.json();
       sLog("Transcript from POST:", transcript?.slice(0, 160) || "<empty>");
-      await updateCardBody(transcriptEl, transcript || "");
-      await updateCardBody(answerEl, "");
-      upsertChatSnapshot(state.currentChatID, { lastTranscript: transcript || "", lastAnswer: "" });
+
+      // Append user message and maybe set title
+      const c = getCurrentChat();
+      const newMessages = [...(c.messages || []), { role: "user", content: transcript || "" }];
+      const title = (c.title === "New Chat" || !c.messages?.length)
+        ? (transcript || "New Chat").slice(0, 48)
+        : c.title;
+
+      upsertChat(state.currentChatID, { messages: newMessages, title });
+
+      renderChatHeader();
+      appendMessageBubble("user", transcript || "");
+      // create placeholder assistant bubble (will stream into it)
+      appendMessageBubble("assistant", "");
+      scrollMessagesToBottom();
 
       audioQueue.length = 0;
       audioPlaying = false;
@@ -631,7 +682,6 @@
     const HARD_CLOSE_MS    = 120000;
 
     return new Promise((resolve, reject) => {
-      // 🔴 pass chatID in query
       const url = `${STREAM_ROUTE}?chatID=${encodeURIComponent(id)}`;
       const es = new EventSource(url, { withCredentials: true });
       currentEventSource = es;
@@ -684,30 +734,47 @@
       es.addEventListener("status", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
       es.addEventListener("subStatus", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
 
-      es.addEventListener("transcript", (e) => {
-        bumpActivity(); sawAnyData = true;
-        const data = safeParse(e.data);
-        if (data?.transcript) scheduleMarkdownUpdate(transcriptEl, data.transcript);
-      });
-
       es.addEventListener("token", (e) => {
         bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
+        // streaming tokens: update UI and snapshot
         if (typeof data?.text === "string") {
           lastAnswerText = data.text;
         } else if (typeof data?.token === "string") {
           lastAnswerText += data.token;
         }
-        scheduleMarkdownUpdate(answerEl, lastAnswerText);
-        upsertChatSnapshot(id, { lastAnswer: lastAnswerText });
+        updateLastAssistantBubble(lastAnswerText);
+
+        const c = getCurrentChat();
+        const msgs = [...(c.messages || [])];
+        // ensure there is an assistant message at the end to replace
+        if (!msgs.length || msgs[msgs.length - 1].role !== "assistant") {
+          msgs.push({ role: "assistant", content: lastAnswerText });
+        } else {
+          msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
+        }
+        upsertChat(state.currentChatID, { messages: msgs });
+
+        scrollMessagesToBottom();
       });
 
       es.addEventListener("answer", (e) => {
         bumpActivity(); sawAnyData = true;
         const data = safeParse(e.data);
         lastAnswerText = data?.answer || lastAnswerText;
-        scheduleMarkdownUpdate(answerEl, lastAnswerText);
-        upsertChatSnapshot(id, { lastAnswer: lastAnswerText });
+
+        updateLastAssistantBubble(lastAnswerText);
+
+        const c = getCurrentChat();
+        const msgs = [...(c.messages || [])];
+        if (!msgs.length || msgs[msgs.length - 1].role !== "assistant") {
+          msgs.push({ role: "assistant", content: lastAnswerText });
+        } else {
+          msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
+        }
+        upsertChat(state.currentChatID, { messages: msgs });
+
+        scrollMessagesToBottom();
       });
 
       es.addEventListener("finishedParagraph", (e) => {
@@ -724,7 +791,8 @@
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
-          scheduleMarkdownUpdate(answerEl, `**Error:** ${payload.message}`);
+          // render an error bubble
+          appendMessageBubble("assistant", `**Error:** ${payload.message}`);
           setStatus("error");
           end(false, "server_error_event");
         } else {
@@ -778,8 +846,52 @@
   }
 
   // ==============================
-  // Markdown / Code / LaTeX support (fail-safe loaders)
+  // Markdown / Code / LaTeX support (best-effort loaders)
   // ==============================
+  async function renderMarkdownInto(el, mdText) {
+    await ensureMarkdown();
+    const src = normalizeFences(mdText || "");
+    if (window.marked && window.DOMPurify) {
+      try {
+        const html = DOMPurify.sanitize(marked.parse(src));
+        el.innerHTML = html;
+      } catch {
+        el.textContent = src;
+      }
+    } else {
+      el.textContent = src;
+    }
+
+    // highlight
+    try {
+      await ensureHighlighting();
+      if (window.hljs) {
+        el.querySelectorAll("pre code").forEach(block => {
+          try { window.hljs.highlightElement(block); } catch {}
+        });
+      }
+    } catch {}
+
+    // katex
+    try {
+      await ensureKatex();
+      if (window.renderMathInElement && window.katex) {
+        window.renderMathInElement(el, {
+          delimiters: [
+            { left: "$$", right: "$$", display: true },
+            { left: "\\[", right: "\\]", display: true },
+            { left: "$",  right: "$",  display: false },
+            { left: "\\(", right: "\\)", display: false },
+          ],
+          throwOnError: false,
+          strict: "warn",
+          trust: false,
+          macros: { "\\RR": "\\mathbb{R}", "\\NN": "\\mathbb{N}", "\\ZZ": "\\mathbb{Z}" }
+        });
+      }
+    } catch {}
+  }
+
   function loadCssOnce(href, key) {
     if (document.querySelector(`link[data-key="${key}"]`)) return;
     const link = document.createElement("link");
@@ -802,7 +914,6 @@
     });
   }
 
-  // Try a list of URLs; succeed on first one; never throw (return boolean)
   async function loadScriptWithFallback(urls, key, timeoutMs = 8000) {
     for (const url of urls) {
       try {
@@ -810,25 +921,18 @@
           loadScriptOnce(url, key),
           new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), timeoutMs))
         ]);
-        sLog("Loaded:", url);
         return true;
-      } catch (e) {
-        console.warn("CDN failed:", url, e?.message || e);
-      }
+      } catch {}
     }
-    console.error("All CDNs failed for", key);
     return false;
   }
 
-  // Replace “smart” quotes/backticks so code fences parse reliably
   function normalizeFences(md) {
     return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
 
   async function ensureMarkdown() {
     if (MD_READY) return;
-
-    // Marked
     if (!window.marked) {
       await loadScriptWithFallback(
         [
@@ -839,8 +943,6 @@
         "marked"
       );
     }
-
-    // DOMPurify
     if (!window.DOMPurify) {
       await loadScriptWithFallback(
         [
@@ -851,29 +953,18 @@
         "dompurify"
       );
     }
-
     if (window.marked) {
       try {
-        marked.setOptions({
-          breaks: true,
-          gfm: true,
-          mangle: false,
-          headerIds: true
-        });
+        marked.setOptions({ breaks: true, gfm: true, mangle: false, headerIds: true });
       } catch {}
     }
-
-    MD_READY = true; // even if CDN failed, we won't crash; rendering will fallback to plain text
+    MD_READY = true;
   }
 
   async function ensureHighlighting() {
     if (HL_READY) return;
-
-    // CSS theme (doesn't matter if this fails)
     loadCssOnce("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css", "hljs-theme")
       || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css", "hljs-theme2");
-
-    // IMPORTANT: use the browser UMD build
     const ok = window.hljs || await loadScriptWithFallback(
       [
         "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js",
@@ -882,18 +973,14 @@
       ],
       "hljs"
     );
-
-    HL_READY = !!window.hljs; // do not throw if false
+    HL_READY = !!window.hljs;
   }
 
   async function ensureKatex() {
     if (KATEX_READY && window.katex && window.renderMathInElement) return;
-
-    // CSS first
     loadCssOnce("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", "katex-css")
       || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css", "katex-css2");
 
-    // JS core
     if (!window.katex) {
       await loadScriptWithFallback(
         [
@@ -904,7 +991,6 @@
         "katex"
       );
     }
-    // Auto-render
     if (!window.renderMathInElement) {
       await loadScriptWithFallback(
         [
@@ -915,91 +1001,7 @@
         "katex-auto"
       );
     }
-
     KATEX_READY = !!(window.katex && window.renderMathInElement);
-  }
-
-  // Swap <pre> → <div> so KaTeX/HTML can render inside
-  function ensureRenderableContainer(el) {
-    if (el && el.tagName === "PRE") {
-      const div = document.createElement("div");
-      div.id = el.id;
-      div.className = el.className;
-      for (const { name, value } of Array.from(el.attributes)) {
-        if (name.startsWith("data-")) div.setAttribute(name, value);
-      }
-      el.replaceWith(div);
-      if (el === transcriptEl) transcriptEl = div;
-      if (el === answerEl)     answerEl = div;
-      return div;
-    }
-    return el;
-  }
-
-  async function renderMarkdown(el, mdText) {
-    el = ensureRenderableContainer(el);
-
-    await ensureMarkdown();
-
-    const src = normalizeFences(mdText);
-    if (window.marked && window.DOMPurify) {
-      try {
-        const html = DOMPurify.sanitize(marked.parse(src));
-        el.style.whiteSpace = "normal";
-        el.style.fontFamily = "inherit";
-        el.innerHTML = html;
-      } catch (e) {
-        console.warn("Markdown render failed, falling back to text:", e);
-        el.textContent = src;
-      }
-    } else {
-      // Fallback: no libs → just show plain text
-      el.textContent = src;
-    }
-
-    // Syntax highlighting (best-effort)
-    try {
-      await ensureHighlighting();
-      if (window.hljs) {
-        el.querySelectorAll("pre code").forEach(block => {
-          try { window.hljs.highlightElement(block); } catch {}
-        });
-      }
-    } catch (e) {
-      console.warn("Highlighting failed:", e);
-    }
-
-    // LaTeX (KaTeX) rendering (best-effort)
-    try {
-      await ensureKatex();
-      if (window.renderMathInElement && window.katex) {
-        window.renderMathInElement(el, {
-          delimiters: [
-            { left: "$$", right: "$$", display: true },
-            { left: "\\[", right: "\\]", display: true },
-            { left: "$",  right: "$",  display: false },
-            { left: "\\(", right: "\\)", display: false },
-          ],
-          throwOnError: false,
-          strict: "warn",
-          trust: false,
-          macros: { "\\RR": "\\mathbb{R}", "\\NN": "\\mathbb{N}", "\\ZZ": "\\mathbb{Z}" }
-        });
-      }
-    } catch (e) {
-      console.warn("KaTeX render failed:", e);
-    }
-  }
-
-  // Throttle streaming paints
-  let mdPaintScheduled = false;
-  function scheduleMarkdownUpdate(el, text) {
-    if (mdPaintScheduled) return;
-    mdPaintScheduled = true;
-    requestAnimationFrame(async () => {
-      mdPaintScheduled = false;
-      await updateCardBody(el, text);
-    });
   }
 
   // ==============================
@@ -1043,29 +1045,6 @@
     mediaRecorder = null;
     mediaChunks = [];
     if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
-  }
-
-  async function updateCardBody(element, value) {
-    element = ensureRenderableContainer(element);
-
-    const text = typeof value === "string" ? value.trim() : "";
-    const isTranscript = element.id === "transcript";
-    const placeholder = isTranscript ? "Waiting for transcript..." : "Waiting for answer...";
-
-    if (text.length === 0) {
-      element.dataset.empty = "true";
-      element.textContent = placeholder;
-    } else {
-      element.dataset.empty = "false";
-      await renderMarkdown(element, text);
-      flashCard(element.closest(".card"));
-    }
-  }
-
-  function flashCard(card) {
-    if (!card) return;
-    card.classList.add("card--active");
-    window.setTimeout(() => card.classList.remove("card--active"), 900);
   }
 
   async function blobToBase64(blob) {
