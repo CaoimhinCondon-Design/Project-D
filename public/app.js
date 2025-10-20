@@ -15,7 +15,7 @@
   const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
 
   // Turn auto-stop
-  const AUTO_STOP_SILENCE_MS = 2000;   // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_SILENCE_MS = 0;   // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
   // Debug
