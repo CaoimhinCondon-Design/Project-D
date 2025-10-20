@@ -59,9 +59,9 @@ async function streamAnswer(chatID, { onToken, signal } = {}) {
   let token;
 
   const stream = await client.responses.create({
-    model: "gpt-5-nano",
+    model: "gpt-4o-mini",
     input: chats[chatID][0],
-    //temperature: 0.2,
+    temperature: 0.2,
     stream: true,
 },  { signal });
 
