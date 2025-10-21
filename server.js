@@ -229,6 +229,19 @@ app.post("/api/message/raw_text", async (req, res) => {
   }
 })
 
+app.post("/api/message/edit", async (req, res) => {
+  try {
+    const { edit, chatID, index, sumIndex} = req.body;
+    if (!edit) return res.status(400).json({ error: "text required" });
+    if (!chatID) return res.status(400).json({ error: "chatID required" });
+
+    chats[chatID][0][index] = { role: "user", content: edit};
+    chats[chatID][1][sumIndex] = { role: "user", content: `Users original question was:\n${edit}`};
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "failed to take user text" });
+  }
+})
 
 app.get("/api/message/stream", async (req, res) => {
   const { chatID } = req.query;
@@ -258,6 +271,9 @@ app.get("/api/message/stream", async (req, res) => {
     if (trimedEvent == "status" && payload.stage){
       info = payload.stage
     }
+    if (trimedEvent == "subStatus" && payload.stage){
+      info = payload.stage
+    }
     if (trimedEvent !== "Heartbeat"){
       console.log("Sent Event: " + event + " " + info)
     }
@@ -271,7 +287,7 @@ app.get("/api/message/stream", async (req, res) => {
     }
   }
 
-  let currentConvoIndex = 0;
+  let currentConvoIndex = -1;
 
   async function workflow(paragraph, index, signal){
     while (currentConvoIndex !== index){await wait(1000)
@@ -301,6 +317,10 @@ app.get("/api/message/stream", async (req, res) => {
   });
 
   try {
+    sendEvent("status", { stage: "user quick response" });
+    const intro_message = 'Write 1-2 short conversational sentences taking in the users question. Do not get into the content of the question. merly sound like you are thinking about it ';
+    workflow(intro_message, -1, signal);
+
     sendEvent("status", { stage: "reasoning" });
     let streamedAnswer = "";
     let paragraphs = [];
