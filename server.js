@@ -318,7 +318,7 @@ app.get("/api/message/stream", async (req, res) => {
 
   try {
     sendEvent("status", { stage: "user quick response" });
-    const intro_message = 'Write 1-2 short conversational sentences taking in the users question. Do not get into the content of the question. merly sound like you are thinking about it ';
+    const intro_message = 'Write 1-2 short conversational sentences taking in the users question. Do not get into the content of the question. merly sound like you are thinking about it. Also phrase things in a unque way from the previous ones you\'ve done ';
     workflow(intro_message, -1, signal);
 
     sendEvent("status", { stage: "reasoning" });
