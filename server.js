@@ -215,6 +215,21 @@ app.post("/api/message/stream", async (req, res) => {
   }
 })
 
+app.post("/api/message/raw_text", async (req, res) => {
+  try {
+    const { text, chatID } = req.body;
+    if (!text) return res.status(400).json({ error: "text required" });
+    if (!chatID) return res.status(400).json({ error: "chatID required" });
+
+    chats[chatID][0].push({ role: "user", content: text});
+    chats[chatID][1].push({ role: "user", content: `Users original question was:\n${text}`});
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: "failed to take user text" });
+  }
+})
+
+
 app.get("/api/message/stream", async (req, res) => {
   const { chatID } = req.query;
   if (!chatID) {
