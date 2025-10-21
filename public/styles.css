@@ -24,8 +24,8 @@
 
   --shadow-soft: 0 1px 2px rgba(0,0,0,.04), 0 4px 16px -8px rgba(0,0,0,.06);
 
-  /* height of the audio dock so we can subtract it from viewport */
-  --dock-h: 64px;
+  /* audio dock removed; keep variable for layout compatibility */
+  --dock-h: 0px;
   --page-pad: 10px;
 
   font-size: 16px;
@@ -146,6 +146,13 @@ body {
 .chat-list__item[aria-current="true"] {
   background: rgba(37,99,235,.08);
   border-color: rgba(37,99,235,.25);
+}
+.chat-list__item--archived {
+  opacity: .65;
+}
+.chat-list__item--archived:hover,
+.chat-list__item--archived:focus-visible {
+  opacity: .75;
 }
 
 /* =========================================================
@@ -268,6 +275,58 @@ body {
   border-radius: var(--radius-xl);
   padding: 8px 10px;
   box-shadow: var(--shadow-soft);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.composer__form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.composer__input {
+  flex: 1 1 180px;
+  padding: .6rem .75rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 1rem;
+  transition: border-color .12s ease, box-shadow .12s ease, background-color .12s ease;
+}
+.composer__input::placeholder {
+  color: var(--muted);
+}
+.composer__input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  background: var(--panel);
+}
+.composer__form > .button {
+  flex: 0 0 auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+.voice-controls {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.volume-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: .9rem;
+  color: var(--muted);
+}
+.volume-control__label {
+  font-weight: 600;
+  letter-spacing: .01em;
+}
+.volume-control__slider {
+  width: 140px;
+  accent-color: var(--ring);
 }
 .btn-group {
   display: flex;
@@ -327,45 +386,6 @@ body {
 }
 
 /* =========================================================
-   Audio Dock (unchanged, keeps its own fixed layer)
-   ========================================================= */
-.audio-dock {
-  position: fixed; left: 0; right: 0; bottom: 0; z-index: 1000;
-  background: rgba(15, 23, 42, 0.75);
-  -webkit-backdrop-filter: blur(8px);
-  backdrop-filter: blur(8px);
-  border-top: 1px solid rgba(148, 163, 184, 0.25);
-  padding: 10px 16px;
-  height: var(--dock-h);
-  display: flex; align-items: center;
-}
-.audio-dock__inner {
-  max-width: min(1200px, 100%);
-  margin: 0 auto;
-  display: flex; align-items: center; gap: 12px; width: 100%;
-}
-.audio-dock__label { color: #e5e7eb; font-size: .9rem; white-space: nowrap; user-select: none; opacity: .9; }
-.audio-dock audio {
-  width: 100%; display: block; border-radius: 10px;
-  background: rgba(2,6,23,.35);
-  box-shadow: 0 8px 28px -12px rgba(0,0,0,.4), inset 0 0 0 1px rgba(148,163,184,.15);
-  outline: none; accent-color: var(--ring);
-}
-.audio-dock audio[hidden] { display: none !important; }
-
-/* Chromium control theming */
-.audio-dock audio::-webkit-media-controls-enclosure {
-  border-radius: 10px; background-color: rgba(15, 23, 42, 0.85); overflow: hidden;
-}
-.audio-dock audio::-webkit-media-controls-panel { background-color: transparent; }
-.audio-dock audio::-webkit-media-controls-play-button,
-.audio-dock audio::-webkit-media-controls-mute-button { filter: invert(1) saturate(.8); }
-.audio-dock audio::-webkit-media-controls-timeline,
-.audio-dock audio::-webkit-media-controls-volume-slider { accent-color: var(--ring); }
-.audio-dock audio::-webkit-media-controls-current-time-display,
-.audio-dock audio::-webkit-media-controls-time-remaining-display { color: #e5e7eb; }
-
-/* =========================================================
    Legacy hero/cards hidden in chat layout (kept for other pages)
    ========================================================= */
 .hero, .stack { display: none; }
@@ -377,3 +397,4 @@ body {
   .app.layout { grid-template-columns: 1fr; }
   .sidebar { order: -1; }
 }
+

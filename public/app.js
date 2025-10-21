@@ -3,8 +3,9 @@
   // ==============================
   // Config
   // ==============================
-  const STREAM_ROUTE = "/api/message/stream"; // POST (transcript) + GET (SSE)
-  const NEW_CHAT_ROUTE = "/api/new_chat";     // create chat IDs server-side
+  const STREAM_ROUTE = "/api/message/stream";   // POST (transcript) + GET (SSE)
+  const NEW_CHAT_ROUTE = "/api/new_chat";       // create chat IDs server-side
+  const RAW_TEXT_ROUTE = "/api/message/raw_text"; // manual text submissions
 
   // Voice detection config
   const FORCE_VAD = true;              // Force VAD-only (prevents Web Speech false wakes/mis-lang)
@@ -85,6 +86,7 @@
 
   // Voice toggle
   let voiceEnabled = false;
+  let composerLocked = false;
 
   // SR error handling
   let srNetworkErrorCount = 0;
@@ -119,6 +121,10 @@
   const stopBtn = document.getElementById("stopBtn");
   const voiceToggleBtn = document.getElementById("voiceToggle");
   const audioEl = document.getElementById("audio");
+  const volumeSlider = document.getElementById("volumeSlider");
+  const textForm = document.getElementById("textComposer");
+  const textInput = document.getElementById("textInput");
+  const sendTextBtn = document.getElementById("sendTextBtn");
 
   // Chat UI
   const chatTitleEl = document.getElementById("chatTitle");
@@ -154,6 +160,15 @@
 
   function enqueueAudioOrdered(index, dataUrl) {
     if (!dataUrl) return;
+    if (typeof index === "number" && index < 0) {
+      audioQueue.unshift(dataUrl);
+      maybePlayNext();
+      return;
+    }
+    if (typeof index !== "number") {
+      enqueueAudio(dataUrl);
+      return;
+    }
     ttsBuffer.set(index, dataUrl);
     maybeFlushTtsBuffer();
   }
@@ -178,47 +193,22 @@
     updateAudio(audioEl, next);
     audioEl.play().catch(() => {});
   }
-  audioEl.addEventListener("ended", () => {
-    audioPlaying = false;
-    maybePlayNext();
-  });
-
-  // ==============================
-  // RMS/VAD Visualizer (debug)
-  // ==============================
-  let rmsMeterEl, rmsCanvas, rmsCtx;
-  function initRmsMeter() {
-    // container
-    rmsMeterEl = document.createElement("div");
-    rmsMeterEl.id = "rmsMeter";
-    rmsMeterEl.style.cssText = `
-      position: fixed; bottom: 1rem; right: 1rem;
-      background: rgba(0,0,0,0.75); color: #0f0;
-      font-family: monospace; padding: 6px 10px;
-      border-radius: 6px; z-index: 9999; font-size: 13px;
-      user-select: none;
-    `;
-    rmsMeterEl.textContent = "RMS: --";
-    document.body.appendChild(rmsMeterEl);
-
-    // tiny bar
-    rmsCanvas = document.createElement("canvas");
-    rmsCanvas.width = 120; rmsCanvas.height = 12;
-    rmsCanvas.style.cssText = "display:block;margin-top:4px;background:#222;";
-    rmsMeterEl.appendChild(rmsCanvas);
-    rmsCtx = rmsCanvas.getContext("2d");
+  if (audioEl) {
+    audioEl.addEventListener("ended", () => {
+      audioPlaying = false;
+      maybePlayNext();
+    });
   }
-  function updateRmsMeter(value, threshold) {
-    if (!rmsMeterEl) return;
-    rmsMeterEl.firstChild.nodeValue = `RMS: ${value.toFixed(4)} (thr ${threshold.toFixed(4)})`;
-    if (rmsCtx) {
-      rmsCtx.clearRect(0, 0, rmsCanvas.width, rmsCanvas.height);
-      const w = Math.max(0, Math.min(rmsCanvas.width, value * rmsCanvas.width * 20));
-      rmsCtx.fillStyle = value > threshold ? "#0f0" : "#555";
-      rmsCtx.fillRect(0, 0, w, rmsCanvas.height);
-    }
+  if (audioEl && volumeSlider) {
+    const applyVolumeFromSlider = () => {
+      const value = parseFloat(volumeSlider.value);
+      if (!Number.isFinite(value)) return;
+      audioEl.volume = Math.min(1, Math.max(0, value));
+    };
+    applyVolumeFromSlider();
+    volumeSlider.addEventListener("input", applyVolumeFromSlider);
+    volumeSlider.addEventListener("change", applyVolumeFromSlider);
   }
-  initRmsMeter();
 
   // ==============================
   // Init
@@ -226,6 +216,7 @@
   setStatus("idle");
   resetRecordingState();
 
+  textForm?.addEventListener("submit", handleTextSubmit);
   // core controls (manual buttons still supported)
   startBtn?.addEventListener("click", handleStartToggle);
   stopBtn?.addEventListener("click", handleStopRecording);
@@ -237,6 +228,10 @@
 
   // ensure we have a chat on boot
   (async () => {
+    const reset = resetChatStateForServerRestart();
+    if (reset) {
+      renderChatList();
+    }
     if (!state.currentChatID) {
       await newChat();
     } else {
@@ -260,7 +255,7 @@
   async function newChat() {
     forceCloseSSE("new_chat");
     const id = await ensureServerChat();
-    upsertChat(id, { id, title: "New Chat", messages: [] });
+    upsertChat(id, { id, title: "New Chat", messages: [], archived: false, serverSynced: true });
     setCurrentChat(id);
     renderChatHeader();
     renderMessages();
@@ -316,7 +311,16 @@
       item.type = "button";
       item.setAttribute("data-chatid", id);
       item.setAttribute("aria-current", id === state.currentChatID ? "true" : "false");
-      item.textContent = c.title || id;
+      const archived = !!c?.archived;
+      item.dataset.archived = archived ? "true" : "false";
+      if (archived) {
+        item.title = "Archived conversation (read only)";
+        item.classList.add("chat-list__item--archived");
+      } else {
+        item.removeAttribute("title");
+        item.classList.remove("chat-list__item--archived");
+      }
+      item.textContent = c?.title || id;
       item.addEventListener("click", () => switchChat(id));
       chatListEl.appendChild(item);
     });
@@ -324,6 +328,7 @@
   function renderChatHeader() {
     const c = getCurrentChat();
     if (chatTitleEl) chatTitleEl.textContent = c?.title || "Project David";
+    setComposerEnabled(!c?.archived);
   }
   function renderMessages() {
     const c = getCurrentChat();
@@ -353,6 +358,138 @@
   }
   function scrollMessagesToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
+  }
+
+  function markChatAsArchived(id, { updateTitle = true } = {}) {
+    if (!id || !state.chats[id]) return;
+    const chat = state.chats[id];
+    const suffix = " (archived)";
+    let title = chat.title || `Chat ${id.slice(-4)}`;
+    if (updateTitle) {
+      const lower = title.toLowerCase();
+      if (!lower.includes("archived")) {
+        title = `${title}${suffix}`;
+      }
+    }
+    upsertChat(id, {
+      title,
+      archived: true,
+      serverSynced: false,
+    });
+  }
+
+  async function ensureActiveChat(reason = "unspecified") {
+    let chat = getCurrentChat();
+    if (!chat) {
+      await newChat();
+      return getCurrentChat();
+    }
+    if (chat.archived || chat.serverSynced === false) {
+      markChatAsArchived(chat.id, { updateTitle: true });
+      await newChat();
+      chat = getCurrentChat();
+    }
+    return chat;
+  }
+
+  async function handleServerDesync(reason = "server_desync") {
+    const current = getCurrentChat();
+    if (current) {
+      markChatAsArchived(current.id, { updateTitle: true });
+    }
+    await newChat();
+    return getCurrentChat();
+  }
+
+  function resetChatStateForServerRestart() {
+    const ids = Object.keys(state.chats);
+    if (!ids.length) return false;
+    let mutated = false;
+    ids.forEach((id) => {
+      const chat = state.chats[id];
+      if (!chat) return;
+      if (!chat.archived || chat.serverSynced !== false) {
+        mutated = true;
+      }
+      chat.archived = true;
+      chat.serverSynced = false;
+      const suffix = " (archived)";
+      if (chat.title) {
+        const lower = chat.title.toLowerCase();
+        if (!lower.includes("archived")) {
+          chat.title = `${chat.title}${suffix}`;
+        }
+      } else {
+        chat.title = `Chat ${id.slice(-4)}${suffix}`;
+      }
+    });
+    let currentCleared = false;
+    if (state.currentChatID) {
+      const active = state.chats[state.currentChatID];
+      if (!active || active.archived || active.serverSynced === false) {
+        state.currentChatID = null;
+        currentCleared = true;
+      }
+    }
+    if (mutated || currentCleared) {
+      try {
+        sessionStorage.setItem("pd_session", JSON.stringify(state));
+      } catch {}
+    }
+    return mutated || currentCleared;
+  }
+
+  function setComposerEnabled(enabled) {
+    composerLocked = !enabled;
+    const disable = !enabled;
+    if (disable && isRecording()) {
+      cancelRecording().catch(() => {});
+    }
+    if (disable && voiceEnabled) {
+      disableVoice().catch(() => {});
+    }
+    if (textInput) textInput.disabled = disable;
+    if (sendTextBtn) sendTextBtn.disabled = disable;
+    if (voiceToggleBtn) voiceToggleBtn.disabled = disable;
+    if (volumeSlider) volumeSlider.disabled = disable;
+    if (disable) {
+      if (startBtn) startBtn.disabled = true;
+      if (stopBtn) stopBtn.disabled = true;
+      return;
+    }
+    setButtonsState({ start: isRecording(), stop: !isRecording() });
+  }
+
+  function isServerDesyncError(err) {
+    const status = err?.status ?? err?.responseStatus;
+    return typeof status === "number" && status >= 500;
+  }
+
+  async function commitUserMessage(userText) {
+    const chat = getCurrentChat();
+    if (!chat || !state.currentChatID || chat.archived) return;
+
+    const messageContent = userText ?? "";
+    const newMessages = [...(chat.messages || []), { role: "user", content: messageContent }];
+    const title = (chat.title === "New Chat" || !chat.messages?.length)
+      ? (messageContent || "New Chat").slice(0, 48)
+      : chat.title;
+
+    upsertChat(state.currentChatID, { messages: newMessages, title });
+
+    renderChatHeader();
+    appendMessageBubble("user", messageContent);
+    appendMessageBubble("assistant", "");
+    scrollMessagesToBottom();
+
+    audioQueue.length = 0;
+    audioPlaying = false;
+    updateAudio(audioEl, null);
+    nextTtsIndex = 0;
+    ttsBuffer.clear?.();
+
+    await openEventStream();
+    setStatus("done");
   }
 
   // ==============================
@@ -539,9 +676,6 @@
         // Dynamic threshold
         const dynThresh = Math.max(calMean + VAD_STD_K * calStd, VAD_THRESH);
 
-        // Update visualizer
-        updateRmsMeter(emaRms, dynThresh);
-
         const now = performance.now();
 
         // --- START gating (require continuous above for VAD_START_CONFIRM_MS) ---
@@ -615,7 +749,6 @@
         try { ac.close(); } catch {}
         try { stream.getTracks().forEach(t => t.stop()); } catch {}
         setStatus("idle");
-        updateRmsMeter(0, 0);
       };
 
     } catch (e) {
@@ -624,10 +757,115 @@
     }
   }
 
+  async function postRawTextMessage(chatID, message) {
+    const controller = new AbortController();
+    const POST_WAIT_MS = 800;
+
+    const payload = JSON.stringify({ text: message, chatID });
+
+    const fetchPromise = fetch(RAW_TEXT_ROUTE, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "Cache-Control": "no-cache",
+      },
+      credentials: "same-origin",
+      body: payload,
+      signal: controller.signal,
+    });
+
+    let timeoutId;
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve("timeout"), POST_WAIT_MS);
+    });
+
+    const result = await Promise.race([
+      fetchPromise.then(async (res) => {
+        if (!res.ok) {
+          const msg = (await res.text().catch(() => "")) || "";
+          const error = new Error(`POST ${RAW_TEXT_ROUTE} failed: ${res.status} ${msg}`);
+          error.status = res.status;
+          error.responseText = msg;
+          throw error;
+        }
+        return "ok";
+      }).catch((err) => {
+        if (err?.name === "AbortError") {
+          return "timeout";
+        }
+        throw err;
+      }),
+      timeoutPromise,
+    ]);
+
+    clearTimeout(timeoutId);
+
+    if (result === "timeout") {
+      controller.abort();
+      sLog("Text submission POST timed out; assuming server accepted request.");
+    }
+    return result;
+  }
+
+  // ==============================
+  // Manual text submission
+  // ==============================
+  async function handleTextSubmit(event) {
+    event.preventDefault();
+    if (!textInput) return;
+
+    const rawValue = textInput.value;
+    const message = rawValue.trim();
+    if (!message) return;
+
+    forceCloseSSE("text_submit");
+    setStatus("processing");
+    textInput.disabled = true;
+    if (sendTextBtn) sendTextBtn.disabled = true;
+
+    try {
+      await ensureActiveChat("text_submit");
+      textInput.disabled = true;
+      if (sendTextBtn) sendTextBtn.disabled = true;
+
+      let attempt = 0;
+      const maxAttempts = 2;
+      while (attempt < maxAttempts) {
+        try {
+          await postRawTextMessage(state.currentChatID, message);
+          break;
+        } catch (err) {
+          if (attempt + 1 < maxAttempts && isServerDesyncError(err)) {
+            await handleServerDesync("raw_text_retry");
+            setStatus("processing");
+            attempt += 1;
+            continue;
+          }
+          throw err;
+        }
+      }
+
+      textInput.value = "";
+      await commitUserMessage(message);
+    } catch (err) {
+      console.error(err);
+      alert("Unable to send message. Please try again.");
+      setStatus("error");
+    } finally {
+      if (!composerLocked) {
+        textInput.disabled = false;
+        if (sendTextBtn) sendTextBtn.disabled = false;
+        textInput.focus();
+      }
+    }
+  }
+
   // ==============================
   // Buttons / Recording flow
   // ==============================
   async function handleStartToggle() {
+    if (composerLocked) return;
     try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
     forceCloseSSE("start_toggle");
 
@@ -684,6 +922,7 @@
   }
 
   async function handleStopRecording() {
+    if (composerLocked) return;
     if (!isRecording()) return;
 
     setButtonsState({ start: true, stop: true });
@@ -733,60 +972,62 @@
 
       const audioBase64 = await blobToBase64(blob);
 
-      const POST_TIMEOUT_MS = 30000;
-      const ctrl = new AbortController();
-      const postTimer = setTimeout(() => ctrl.abort("post_timeout"), POST_TIMEOUT_MS);
+      await ensureActiveChat("audio_submit");
 
+      const POST_TIMEOUT_MS = 30000;
+      const maxPostAttempts = 2;
+      let attempt = 0;
       let postRes;
-      try {
-        // include chatID with POST
-        postRes = await fetch(STREAM_ROUTE, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            "Cache-Control": "no-cache",
-          },
-          credentials: "same-origin",
-          body: JSON.stringify({ audioBase64, chatID: state.currentChatID }),
-          signal: ctrl.signal,
-        });
-      } finally {
-        clearTimeout(postTimer);
+
+      while (attempt < maxPostAttempts) {
+        const ctrl = new AbortController();
+        const postTimer = setTimeout(() => ctrl.abort("post_timeout"), POST_TIMEOUT_MS);
+        try {
+          postRes = await fetch(STREAM_ROUTE, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Accept: "application/json",
+              "Cache-Control": "no-cache",
+            },
+            credentials: "same-origin",
+            body: JSON.stringify({ audioBase64, chatID: state.currentChatID }),
+            signal: ctrl.signal,
+          });
+        } finally {
+          clearTimeout(postTimer);
+        }
+
+        if (postRes?.ok) {
+          break;
+        }
+
+        const status = postRes?.status;
+        const msg = (await postRes?.text()?.catch(() => "")) || "";
+        if (attempt + 1 < maxPostAttempts && typeof status === "number" && status >= 500) {
+          await handleServerDesync("audio_post_retry");
+          setStatus("processing");
+          attempt += 1;
+          continue;
+        }
+        const error = new Error(`POST ${STREAM_ROUTE} failed: ${status} ${msg}`);
+        error.status = status;
+        error.responseText = msg;
+        throw error;
       }
 
       if (!postRes?.ok) {
-        const msg = (await postRes?.text()?.catch(() => "")) || "";
-        throw new Error(`POST ${STREAM_ROUTE} failed: ${postRes?.status} ${msg}`);
+        const finalError = new Error(`POST ${STREAM_ROUTE} failed after retries`);
+        finalError.status = postRes?.status;
+        throw finalError;
       }
 
+      forceCloseSSE("audio_submit");
       const { transcript } = await postRes.json();
-      sLog("Transcript from POST:", transcript?.slice(0, 160) || "<empty>");
+      const messageText = typeof transcript === "string" ? transcript : "";
+      sLog("Transcript from POST:", messageText.slice(0, 160) || "<empty>");
 
-      // Append user message and maybe set title
-      const c = getCurrentChat();
-      const newMessages = [...(c.messages || []), { role: "user", content: transcript || "" }];
-      const title = (c.title === "New Chat" || !c.messages?.length)
-        ? (transcript || "New Chat").slice(0, 48)
-        : c.title;
-
-      upsertChat(state.currentChatID, { messages: newMessages, title });
-
-      renderChatHeader();
-      appendMessageBubble("user", transcript || "");
-      // create placeholder assistant bubble (will stream into it)
-      appendMessageBubble("assistant", "");
-      scrollMessagesToBottom();
-
-      // reset audio queue before new TTS
-      audioQueue.length = 0;
-      audioPlaying = false;
-      updateAudio(audioEl, null);
-      nextTtsIndex = 0;
-      ttsBuffer.clear?.();
-
-      await openEventStream();
-      setStatus("done");
+      await commitUserMessage(messageText);
     } catch (err) {
       console.error(err);
       alert("Something went wrong while sending/streaming.");
@@ -1148,9 +1389,13 @@
     try { return JSON.parse(s); } catch { return null; }
   }
   function updateAudio(el, dataUrl) {
+    if (!el) return;
+    const sliderVal = volumeSlider ? parseFloat(volumeSlider.value) : NaN;
+    if (Number.isFinite(sliderVal)) {
+      el.volume = Math.min(1, Math.max(0, sliderVal));
+    }
     if (dataUrl) {
       el.src = dataUrl;
-      el.removeAttribute("hidden");
       el.load();
       el.play().catch(() => {});
     } else {
@@ -1160,6 +1405,11 @@
     }
   }
   function setButtonsState({ start, stop }) {
+    if (composerLocked) {
+      if (startBtn) startBtn.disabled = true;
+      if (stopBtn) stopBtn.disabled = true;
+      return;
+    }
     startBtn && (startBtn.disabled = !!start);
     stopBtn && (stopBtn.disabled = !!stop);
   }
