@@ -18,14 +18,15 @@
   const VAD_START_CONFIRM_MS = 120;    // Must stay above threshold this long to confirm start
 
   // Turn auto-stop
-  const AUTO_STOP_SILENCE_MS = 500;   // If silent this long while recording -> auto stop & send
+  const AUTO_STOP_SILENCE_MS = 500;    // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
-  // Minimum length gates 
-  const MIN_SPEECH_MS = 1000;          // Require at least 1s total utterance duration
-  const MIN_ACTIVE_SPEECH_MS = 400;    // Require ≥400ms actually above threshold
-  const MIN_SNR_DB = 7;                // Peak SNR vs ambient must exceed 7 dB
-  const MIN_PEAK_RMS = 0.010;          // Peak RMS must exceed this absolute value
+  // Minimum length gates (made more forgiving)
+  const MIN_SPEECH_MS = 700;           // was 1000
+  const MIN_ACTIVE_SPEECH_MS = 120;    // was 400
+  const MIN_SNR_DB = 3;                // was 7
+  const MIN_PEAK_RMS = 0.004;          // was 0.010
+  const SNR_EPS = 1e-8;                // epsilon to avoid -Infinity
 
   // Debug
   const STREAM_DEBUG = true;
@@ -217,9 +218,10 @@
   resetRecordingState();
 
   textForm?.addEventListener("submit", handleTextSubmit);
-  // core controls (manual buttons still supported)
-  startBtn?.addEventListener("click", handleStartToggle);
-  stopBtn?.addEventListener("click", handleStopRecording);
+
+  // Prevent form submission on Start/Stop clicks
+  startBtn?.addEventListener("click", (e) => { e.preventDefault(); handleStartToggle(); });
+  stopBtn?.addEventListener("click",  (e) => { e.preventDefault(); handleStopRecording({ fromAuto: false }); });
   attachVoiceToggle();
 
   // chat controls
@@ -239,6 +241,7 @@
       renderMessages();
       renderChatList();
     }
+    refreshButtonsFromState();
   })().catch(console.error);
 
   // ==============================
@@ -265,6 +268,7 @@
     nextTtsIndex = 0;
     audioQueue.length = 0;
     audioPlaying = false;
+    refreshButtonsFromState();
   }
 
   async function deleteCurrentChat() {
@@ -295,6 +299,7 @@
     nextTtsIndex = 0;
     audioQueue.length = 0;
     audioPlaying = false;
+    refreshButtonsFromState();
   }
 
   // Sidebar rendering
@@ -457,7 +462,7 @@
       if (stopBtn) stopBtn.disabled = true;
       return;
     }
-    setButtonsState({ start: isRecording(), stop: !isRecording() });
+    refreshButtonsFromState();
   }
 
   function isServerDesyncError(err) {
@@ -661,6 +666,9 @@
       let lastAboveTs = 0;
       let speaking = false;
 
+      // Use real delta time to accumulate active speech (prevents 0ms under RAF throttling)
+      let lastLoopTs = performance.now();
+
       let rafId = 0;
       function loop() {
         if (!voiceEnabled) return;
@@ -677,6 +685,8 @@
         const dynThresh = Math.max(calMean + VAD_STD_K * calStd, VAD_THRESH);
 
         const now = performance.now();
+        const dt = Math.max(0, now - lastLoopTs);
+        lastLoopTs = now;
 
         // --- START gating (require continuous above for VAD_START_CONFIRM_MS) ---
         if (emaRms > dynThresh) {
@@ -719,10 +729,8 @@
           // Track peak RMS (use instantaneous, not EMA)
           if (instRms > vadStats.peakRms) vadStats.peakRms = instRms;
 
-          // Accumulate time we are actually above threshold
+          // Accumulate time we are actually above threshold (use real dt)
           if (emaRms > dynThresh) {
-            // Approximate per frame duration by RAF cadence (~16ms); more robust: use delta time
-            const dt = 1000 / 60; // ~16.7ms
             vadStats.activeSpeechMs += dt;
           }
 
@@ -733,7 +741,7 @@
           if (!autoStopping && recMs > Math.max(AUTO_STOP_MIN_MS, MIN_SPEECH_MS) && silenceMs > AUTO_STOP_SILENCE_MS) {
             autoStopping = true;
             sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & maybe send`);
-            handleStopRecording().finally(() => {
+            handleStopRecording({ fromAuto: true }).finally(() => {
               autoStopping = false;
               resumeRecognitionAfterRecording();
             });
@@ -878,6 +886,7 @@
   }
 
   async function handleStartRecording() {
+    if (isRecording()) return; // guard against double-starts
     try {
       activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
@@ -912,20 +921,23 @@
       mediaRecorder._stopPromise = stopPromise;
       mediaRecorder.start();
       setStatus("recording");
-      setButtonsState({ start: true, stop: false });
+      refreshButtonsFromState();
     } catch (err) {
       console.error(err);
       alert("Microphone permission is required.");
       resetRecordingState();
+      refreshButtonsFromState();
       if (voiceEnabled) resumeRecognitionAfterRecording();
     }
   }
 
-  async function handleStopRecording() {
+  // Important: fromAuto===true when VAD triggers stop; false when user clicks Stop
+  async function handleStopRecording(opts = { fromAuto: false }) {
+    const fromAuto = !!opts.fromAuto;
     if (composerLocked) return;
     if (!isRecording()) return;
 
-    setButtonsState({ start: true, stop: true });
+    refreshButtonsFromState();
     setStatus("processing");
 
     // snapshot when stop is requested so we can compute utterance duration
@@ -942,32 +954,49 @@
     try {
       const blob = await stopPromise;
 
-      // Duration gate
+      // Duration gate (very light when manual stop)
       const utteranceMs = stopCalledAt - recordingStartedAt;
-      if (utteranceMs < MIN_SPEECH_MS) {
-        sLog(`Discarding short utterance: ${Math.round(utteranceMs)}ms < ${MIN_SPEECH_MS}ms`);
-        setStatus("idle");
-        resetRecordingState();
-        if (voiceEnabled) resumeRecognitionAfterRecording();
-        return;
-      }
+      const blobOk = blob && blob.size > 0;
 
-      // Quality gates (prevent uploading near-silence)
-      const peak = vadStats.peakRms || 0;
-      const ambient = Math.max(vadStats.calMean || 0, 1e-6);
-      const snrDb = 20 * Math.log10(peak / ambient);
-      const activeOk = vadStats.activeSpeechMs >= MIN_ACTIVE_SPEECH_MS;
-      const peakOk = peak >= MIN_PEAK_RMS;
-      const snrOk = snrDb >= MIN_SNR_DB;
+      if (!fromAuto) {
+        // Manual stop path: be permissive so Start/Stop always works
+        if (!blobOk || utteranceMs < 300) {
+          sLog(`Manual stop: discarding (blobOk=${blobOk}, ms=${Math.round(utteranceMs)})`);
+          setStatus("idle");
+          resetRecordingState();
+          refreshButtonsFromState();
+          if (voiceEnabled) resumeRecognitionAfterRecording();
+          return;
+        }
+      } else {
+        // Auto (VAD) path: apply quality gates
+        if (utteranceMs < MIN_SPEECH_MS) {
+          sLog(`Discarding short utterance: ${Math.round(utteranceMs)}ms < ${MIN_SPEECH_MS}ms`);
+          setStatus("idle");
+          resetRecordingState();
+          refreshButtonsFromState();
+          if (voiceEnabled) resumeRecognitionAfterRecording();
+          return;
+        }
 
-      sLog(`VAD quality — peak=${peak.toFixed(4)} snrDb=${snrDb.toFixed(1)} activeMs=${Math.round(vadStats.activeSpeechMs)} (ok? p:${peakOk} snr:${snrOk} act:${activeOk})`);
+        // Quality gates (prevent uploading near-silence)
+        const peak = vadStats.peakRms || 0;
+        const ambient = Math.max(vadStats.calMean || 0, SNR_EPS);
+        const snrDb = 20 * Math.log10((peak + SNR_EPS) / ambient);
+        const activeOk = vadStats.activeSpeechMs >= MIN_ACTIVE_SPEECH_MS;
+        const peakOk = peak >= MIN_PEAK_RMS;
+        const snrOk = snrDb >= MIN_SNR_DB;
 
-      if (!(activeOk && peakOk && snrOk)) {
-        sLog("Discarding due to failing quality gates (likely silence/noise).");
-        setStatus("idle");
-        resetRecordingState();
-        if (voiceEnabled) resumeRecognitionAfterRecording();
-        return;
+        sLog(`VAD quality — peak=${peak.toFixed(4)} snrDb=${Number.isFinite(snrDb)?snrDb.toFixed(1):'-'} activeMs=${Math.round(vadStats.activeSpeechMs)} (ok? p:${peakOk} snr:${snrOk} act:${activeOk})`);
+
+        if (!(activeOk && peakOk && snrOk)) {
+          sLog("Discarding due to failing quality gates (likely silence/noise).");
+          setStatus("idle");
+          resetRecordingState();
+          refreshButtonsFromState();
+          if (voiceEnabled) resumeRecognitionAfterRecording();
+          return;
+        }
       }
 
       const audioBase64 = await blobToBase64(blob);
@@ -1034,6 +1063,7 @@
       setStatus("error");
     } finally {
       resetRecordingState();
+      refreshButtonsFromState();
       if (voiceEnabled) resumeRecognitionAfterRecording();
     }
   }
@@ -1041,7 +1071,7 @@
   async function cancelRecording() {
     sLog("Cancel recording");
     setStatus("idle");
-    setButtonsState({ start: false, stop: true });
+    refreshButtonsFromState();
 
     try {
       if (isRecording()) mediaRecorder.stop();
@@ -1404,15 +1434,21 @@
       el.load();
     }
   }
-  function setButtonsState({ start, stop }) {
+
+  // Button state — single source of truth
+  function refreshButtonsFromState() {
     if (composerLocked) {
       if (startBtn) startBtn.disabled = true;
-      if (stopBtn) stopBtn.disabled = true;
+      if (stopBtn)  stopBtn.disabled  = true;
       return;
     }
-    startBtn && (startBtn.disabled = !!start);
-    stopBtn && (stopBtn.disabled = !!stop);
+    const rec = isRecording();
+    if (startBtn) startBtn.disabled = rec;
+    if (stopBtn)  stopBtn.disabled  = !rec;
   }
+  // Kept for compatibility if something else calls it
+  function setButtonsState() { refreshButtonsFromState(); }
+
   function setStatus(state) {
     if (!statusEl) return;
     const label = statusLabels[state] ?? statusLabels.idle;
@@ -1425,10 +1461,10 @@
     statusEl.textContent = text;
   }
   function resetRecordingState() {
-    setButtonsState({ start: false, stop: true });
     mediaRecorder = null;
     mediaChunks = [];
     if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
+    refreshButtonsFromState();
   }
   async function blobToBase64(blob) {
     const buffer = await blob.arrayBuffer();
