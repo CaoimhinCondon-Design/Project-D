@@ -20,7 +20,7 @@
   const AUTO_STOP_SILENCE_MS = 500;   // If silent this long while recording -> auto stop & send
   const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
 
-  // Minimum quality gates to prevent "silent Korean" uploads
+  // Minimum length gates 
   const MIN_SPEECH_MS = 1000;          // Require at least 1s total utterance duration
   const MIN_ACTIVE_SPEECH_MS = 400;    // Require ≥400ms actually above threshold
   const MIN_SNR_DB = 7;                // Peak SNR vs ambient must exceed 7 dB
