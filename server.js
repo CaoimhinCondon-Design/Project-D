@@ -171,6 +171,38 @@ async function speakWithTTS(summaryText) {
 }
 
 /**
+ * Event handling
+ */
+const EVENT_BUFFER_LIMIT = 500; // tune as needed
+const sseState = {
+  // [chatID]: { nextId: number, buffer: Array<{id,event,data,ts}> }
+};
+
+function getSseState(chatID) {
+  if (!sseState[chatID]) {
+    sseState[chatID] = { nextId: 1, buffer: [] };
+  }
+  return sseState[chatID];
+}
+
+function pushToBuffer(chatID, msg) {
+  const state = getSseState(chatID);
+  state.buffer.push(msg);
+  if (state.buffer.length > EVENT_BUFFER_LIMIT) state.buffer.shift();
+}
+
+function writeSse(res, { id, event, data }) {
+  // Optional reconnection hint:
+  // res.write(`retry: 4000\n`);
+  res.write(`id: ${id}\n`);
+  if (event) res.write(`event: ${event}\n`);
+  res.write(`data: ${JSON.stringify(data)}\n\n`);
+}
+
+
+
+
+/**
  * get and POST /api/message/stream
  */
 app.get("/api/new_chat", (_req, res) => {
@@ -227,6 +259,7 @@ app.post("/api/message/raw_text", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "failed to take user text" });
   }
+  res.json({ ok: true });
 })
 
 app.post("/api/message/edit", async (req, res) => {
@@ -241,12 +274,15 @@ app.post("/api/message/edit", async (req, res) => {
     console.error(e);
     res.status(500).json({ error: "failed to take user text" });
   }
+  res.json({ ok: true });
 })
+
+let eventBuffer = {}
 
 app.get("/api/message/stream", async (req, res) => {
   const { chatID } = req.query;
-  if (!chatID) {
-    res.status(400).json({ error: "chatID required" });
+  if (!chatID || !chats[chatID]) {
+    res.status(400).json({ error: "valid chatID required" });
     return;
   }
 
@@ -257,31 +293,61 @@ app.get("/api/message/stream", async (req, res) => {
   res.setHeader("X-Accel-Buffering", "no"); // respected by nginx & some PaaS
   res.flushHeaders?.();
 
-  const sendEvent = (event, payload) => {
-    const trimedEvent = event.trim();
-    if (trimedEvent == "answer"){
-      chats[chatID].reasoningBuffer = ""; //reset reasoning buffer when we have full answer
-      chats[chatID][0].push({ role: "assistant", content: payload.answer});
-      chats[chatID][1].push({ role: "assistant", content: payload.answer});
+  const state = getSseState(chatID);
+
+  const sendEvent = (event, payload = {}) => {
+    const id = state.nextId++;
+    const trimmed = (event || "").trim();
+    if (trimmed === "Heartbeat") {
+      // send but do not buffer:
+      writeSse(res, { id, event: trimmed, data: payload });
+      return;
     }
-    if (trimedEvent == "token"){
+    
+
+    // Mutate payload to include a copy of event id if you want parity with existing client
+    payload.event_id = id;
+
+    // Server-side bookkeeping (your existing side-effects kept):
+    
+    if (trimmed === "answer") {
+      chats[chatID].reasoningBuffer = "";
+      chats[chatID][0].push({ role: "assistant", content: payload.answer });
+      chats[chatID][1].push({ role: "assistant", content: payload.answer });
+    }
+    if (trimmed === "token") {
       chats[chatID].reasoningBuffer = payload.text;
     }
-    let info = ""
-    if (trimedEvent == "status" && payload.stage){
-      info = payload.stage
+
+    let info = "";
+    if ((trimmed === "status" || trimmed === "subStatus") && payload.stage) {
+      info = payload.stage;
     }
-    if (trimedEvent == "subStatus" && payload.stage){
-      info = payload.stage
+    if (trimmed !== "Heartbeat") {
+      console.log("Sent Event:", trimmed, info);
     }
-    if (trimedEvent !== "Heartbeat"){
-      console.log("Sent Event: " + event + " " + info)
+
+    const message = { id, event: trimmed, data: payload, ts: Date.now() };
+    pushToBuffer(chatID, message);
+    writeSse(res, message);
+  };
+
+  // After headers & before you start sending new events:
+  const lastIdHeader = req.headers["last-event-id"];
+  const lastIdQuery = Number(req.query.lastEventId || 0);
+  const lastId = Number(lastIdHeader || lastIdQuery || 0) || 0;
+
+  if (lastId > 0) {
+    const { buffer } = getSseState(chatID);
+    // Replay anything newer than lastId
+    for (const msg of buffer) {
+      if (msg.id > lastId) writeSse(res, msg);
     }
-    res.write(`event: ${trimedEvent}\ndata: ${JSON.stringify(payload)}\n\n`);
   }
 
+
   async function heartBeat(signal) {
-    while (signal) {
+    while (!signal.aborted) {
       sendEvent("Heartbeat", {})
       await wait(10000)
     }
