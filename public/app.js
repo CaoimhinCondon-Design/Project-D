@@ -332,7 +332,7 @@
   }
   function renderChatHeader() {
     const c = getCurrentChat();
-    if (chatTitleEl) chatTitleEl.textContent = c?.title || "Project David";
+    if (chatTitleEl) chatTitleEl.textContent = c?.title || "Obscura";
     setComposerEnabled(!c?.archived);
   }
   function renderMessages() {
