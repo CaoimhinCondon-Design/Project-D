@@ -29,10 +29,12 @@
       return { currentChatID: null, chats: {} };
     }
   }
+
   function saveSession(next) {
     sessionStorage.setItem("pd_session", JSON.stringify(next));
     renderChatList();
   }
+
   let state = loadSession();
 
   function upsertChat(id, patch = {}) {
@@ -47,10 +49,12 @@
     state.chats[id] = next;
     saveSession(state);
   }
+
   function setCurrentChat(id) {
     state.currentChatID = id;
     saveSession(state);
   }
+
   function getCurrentChat() {
     return state.currentChatID ? state.chats[state.currentChatID] : null;
   }
@@ -141,6 +145,7 @@
     ttsBuffer.set(index, dataUrl);
     maybeFlushTtsBuffer();
   }
+
   function maybeFlushTtsBuffer() {
     while (ttsBuffer.has(nextTtsIndex)) {
       audioQueue.push(ttsBuffer.get(nextTtsIndex));
@@ -149,11 +154,13 @@
     }
     maybePlayNext();
   }
+
   function enqueueAudio(dataUrl) {
     if (!dataUrl) return;
     audioQueue.push(dataUrl);
     maybePlayNext();
   }
+
   function maybePlayNext() {
     if (audioPlaying) return;
     const next = audioQueue.shift();
@@ -162,6 +169,7 @@
     updateAudio(audioEl, next);
     audioEl.play().catch(() => {});
   }
+
   if (audioEl) {
     audioEl.addEventListener("ended", () => {
       audioPlaying = false;
@@ -221,6 +229,7 @@
   // ==============================
   // Chat management
   // ==============================
+
   async function ensureServerChat() {
     const r = await fetch(NEW_CHAT_ROUTE, { credentials: "same-origin" });
     if (!r.ok) throw new Error(await r.text());
@@ -285,6 +294,7 @@
   }
 
   // Sidebar rendering
+
   function renderChatList() {
     if (!chatListEl) return;
     const ids = Object.keys(state.chats).sort(
@@ -317,11 +327,13 @@
       chatListEl.appendChild(item);
     });
   }
+
   function renderChatHeader() {
     const c = getCurrentChat();
     if (chatTitleEl) chatTitleEl.textContent = c?.title || "Obscura";
     setComposerEnabled(!c?.archived);
   }
+
   function renderMessages() {
     const c = getCurrentChat();
     if (!messagesEl) return;
@@ -330,6 +342,7 @@
     for (const m of msgs) appendMessageBubble(m.role, m.content);
     scrollMessagesToBottom();
   }
+
   function appendMessageBubble(role, content) {
     const wrap = document.createElement("div");
     wrap.className = `msg msg--${role}`;
@@ -339,6 +352,7 @@
     renderMarkdownInto(bubble, content);
     messagesEl.appendChild(wrap);
   }
+
   function updateLastAssistantBubble(text) {
     const nodes = messagesEl.querySelectorAll(".msg--assistant .msg__bubble");
     const target = nodes[nodes.length - 1];
@@ -348,6 +362,7 @@
     }
     renderMarkdownInto(target, text || "");
   }
+
   function scrollMessagesToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -531,12 +546,8 @@
             console.log("Interrupt on VAD onset failed:", e);
           }
 
-          // Start your existing recording pipeline if not already recording
-          if (!isRecording()) {
-            handleStartRecording().catch((err) =>
-              console.log("VAD start recording failed:", err)
-            );
-          }
+          // IMPORTANT: we do NOT start recording here anymore.
+          // Recording is already running from enableVoice().
         },
 
         // Called when the user STOPS talking for long enough
@@ -561,11 +572,20 @@
           "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
       });
 
-      // Actually begin listening to the mic
+      // Start VAD listening to the mic
       micVAD.start();
+
+      // Start recording immediately so we include some pre-speech audio.
+      // This acts like an audio buffer: we're already recording before the first word.
+      if (!isRecording()) {
+        await handleStartRecording().catch((err) =>
+          console.log("Initial recording start failed:", err)
+        );
+      }
+
       voiceEnabled = true;
       setStatusLabel("Listening…");
-      console.log("MicVAD started");
+      console.log("MicVAD started, recording pre-roll audio");
     } catch (e) {
       console.error("Failed to enable voice:", e);
       alert("Please allow microphone access to enable Voice mode.");
@@ -916,6 +936,17 @@
     } finally {
       resetRecordingState();
       refreshButtonsFromState();
+
+      // If this stop was triggered by VAD and voice mode is still on,
+      // immediately start a new recording so we keep buffering audio
+      // for the next utterance.
+      if (fromAuto && voiceEnabled) {
+        try {
+          await handleStartRecording();
+        } catch (e) {
+          console.error("Failed to restart recording after VAD stop:", e);
+        }
+      }
     }
   }
 
@@ -1213,6 +1244,7 @@
     link.setAttribute("data-key", key);
     document.head.appendChild(link);
   }
+
   function loadScriptOnce(src, key) {
     return new Promise((resolve, reject) => {
       if (document.querySelector(`script[data-key="${key}"]`))
@@ -1226,6 +1258,7 @@
       document.head.appendChild(s);
     });
   }
+
   async function loadScriptWithFallback(urls, key, timeoutMs = 8000) {
     for (const url of urls) {
       try {
@@ -1240,9 +1273,11 @@
     }
     return false;
   }
+
   function normalizeFences(md) {
     return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
+
   async function ensureMarkdown() {
     if (MD_READY) return;
     if (!window.marked) {
@@ -1277,6 +1312,7 @@
     }
     MD_READY = true;
   }
+
   async function ensureHighlighting() {
     if (HL_READY) return;
     loadCssOnce(
@@ -1299,6 +1335,7 @@
       ));
     HL_READY = !!window.hljs;
   }
+
   async function ensureKatex() {
     if (KATEX_READY && window.katex && window.renderMathInElement) return;
     loadCssOnce(
@@ -1343,6 +1380,7 @@
       return null;
     }
   }
+
   function updateAudio(el, dataUrl) {
     if (!el) return;
     const sliderVal = volumeSlider
@@ -1373,10 +1411,8 @@
     if (startBtn) startBtn.disabled = rec;
     if (stopBtn) stopBtn.disabled = !rec;
   }
+
   // Kept for compatibility if something else calls it
-  function setButtonsState() {
-    refreshButtonsFromState();
-  }
 
   function setStatus(state) {
     if (!statusEl) return;
@@ -1384,11 +1420,13 @@
     statusEl.dataset.state = state;
     statusEl.textContent = label;
   }
+
   function setStatusLabel(text) {
     if (!statusEl) return;
     statusEl.dataset.state = "processing";
     statusEl.textContent = text;
   }
+
   function resetRecordingState() {
     mediaRecorder = null;
     mediaChunks = [];
@@ -1398,6 +1436,7 @@
     }
     refreshButtonsFromState();
   }
+
   async function blobToBase64(blob) {
     const buffer = await blob.arrayBuffer();
     let binary = "";
@@ -1410,4 +1449,5 @@
     }
     return window.btoa(binary);
   }
+
 })();
