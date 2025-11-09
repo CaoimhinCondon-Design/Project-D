@@ -1,0 +1,24 @@
+services:
+  server:
+    container_name: obscura-server
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    # Load env vars from your .env file (PORT, OPENAI_API_KEY, etc.)
+    env_file:
+      - .env
+
+    # You can override or add environment variables here
+    # These win over values in .env if duplicated.
+    environment:
+      NODE_ENV: production
+      # If you ever want to override PORT:
+      # PORT: 3000
+
+    # Host:Container → app listens on 3000 inside the container
+    ports:
+      - "3000:3000"
+
+    # Optional but nice so it restarts if it crashes
+    restart: unless-stopped
