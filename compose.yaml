@@ -1,6 +1,6 @@
 services:
   server:
-    container_name: project-d-server
+    container_name: obscura-server
     build:
       context: .
       dockerfile: Dockerfile
