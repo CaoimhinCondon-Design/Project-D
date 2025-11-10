@@ -7,26 +7,8 @@
   const NEW_CHAT_ROUTE = "/api/new_chat";       // create chat IDs server-side
   const RAW_TEXT_ROUTE = "/api/message/raw_text"; // manual text submissions
 
-  // Voice detection config
-  const FORCE_VAD = true;              // Force VAD-only (prevents Web Speech false wakes/mis-lang)
-  const VOICE_LANG = "en-US";          // Language hint for SR if ever enabled
-  const VAD_CALIBRATION_MS = 1500;     // Ambient calibration window
-  const VAD_RMS_SMOOTH = 0.40;         // EMA smoothing factor [0..1]
-  const VAD_STD_K = 1.30;              // Dynamic threshold = mean + K*std
-  const VAD_THRESH = 0.003;            // Absolute minimum threshold (fallback)
-  const VAD_HANG_MS = 1000;            // Debounce after last energy before "not speaking"
-  const VAD_START_CONFIRM_MS = 120;    // Must stay above threshold this long to confirm start
-
-  // Turn auto-stop
-  const AUTO_STOP_SILENCE_MS = 500;    // If silent this long while recording -> auto stop & send
-  const AUTO_STOP_MIN_MS = 500;        // Don't auto-stop before at least this much audio is captured
-
-  // Minimum length gates (made more forgiving)
+  // Minimum length gate for auto (VAD) stops
   const MIN_SPEECH_MS = 700;           // was 1000
-  const MIN_ACTIVE_SPEECH_MS = 120;    // was 400
-  const MIN_SNR_DB = 3;                // was 7
-  const MIN_PEAK_RMS = 0.004;          // was 0.010
-  const SNR_EPS = 1e-8;                // epsilon to avoid -Infinity
 
   // Debug
   const STREAM_DEBUG = true;
@@ -38,13 +20,21 @@
   // Session (multi-chat, per tab)
   // ==============================
   function loadSession() {
-    try { return JSON.parse(sessionStorage.getItem("pd_session")) || { currentChatID: null, chats: {} }; }
-    catch { return { currentChatID: null, chats: {} }; }
+    try {
+      return JSON.parse(sessionStorage.getItem("pd_session")) || {
+        currentChatID: null,
+        chats: {},
+      };
+    } catch {
+      return { currentChatID: null, chats: {} };
+    }
   }
+
   function saveSession(next) {
     sessionStorage.setItem("pd_session", JSON.stringify(next));
     renderChatList();
   }
+
   let state = loadSession();
 
   function upsertChat(id, patch = {}) {
@@ -53,16 +43,18 @@
       title: `Chat ${id.slice(-4)}`,
       createdAt: Date.now(),
       lastUpdatedAt: Date.now(),
-      messages: []
+      messages: [],
     };
     const next = { ...prev, ...patch, lastUpdatedAt: Date.now() };
     state.chats[id] = next;
     saveSession(state);
   }
+
   function setCurrentChat(id) {
     state.currentChatID = id;
     saveSession(state);
   }
+
   function getCurrentChat() {
     return state.currentChatID ? state.chats[state.currentChatID] : null;
   }
@@ -79,35 +71,15 @@
   let currentEventSource = null;
   let interrupting = false;
 
-  // SpeechRecognition / VAD
-  let recognition = null;
-  let recognitionRunning = false;
-  let recognitionManuallyPaused = false;
-  let vadStopFn = null;
+  // VAD (MicVAD)
+  let micVAD = null;
 
   // Voice toggle
   let voiceEnabled = false;
   let composerLocked = false;
 
-  // SR error handling
-  let srNetworkErrorCount = 0;
-  const SR_NETWORK_ERROR_LIMIT = 3;
-  const SR_ERROR_WINDOW_MS = 5000;
-  let srErrorWindowStart = 0;
-
   // Auto-stop tracking
   let recordingStartedAt = 0;
-  let lastSpeechTs = 0;
-  let talking = false;
-  let autoStopping = false;
-
-  // VAD stats for quality gating
-  let vadStats = {
-    calMean: 0,
-    peakRms: 0,
-    activeSpeechMs: 0
-  };
-  let startCandidateAt = 0;
 
   // Markdown / Code / Math
   let MD_READY = false;
@@ -173,6 +145,7 @@
     ttsBuffer.set(index, dataUrl);
     maybeFlushTtsBuffer();
   }
+
   function maybeFlushTtsBuffer() {
     while (ttsBuffer.has(nextTtsIndex)) {
       audioQueue.push(ttsBuffer.get(nextTtsIndex));
@@ -181,11 +154,13 @@
     }
     maybePlayNext();
   }
+
   function enqueueAudio(dataUrl) {
     if (!dataUrl) return;
     audioQueue.push(dataUrl);
     maybePlayNext();
   }
+
   function maybePlayNext() {
     if (audioPlaying) return;
     const next = audioQueue.shift();
@@ -194,6 +169,7 @@
     updateAudio(audioEl, next);
     audioEl.play().catch(() => {});
   }
+
   if (audioEl) {
     audioEl.addEventListener("ended", () => {
       audioPlaying = false;
@@ -220,8 +196,14 @@
   textForm?.addEventListener("submit", handleTextSubmit);
 
   // Prevent form submission on Start/Stop clicks
-  startBtn?.addEventListener("click", (e) => { e.preventDefault(); handleStartToggle(); });
-  stopBtn?.addEventListener("click",  (e) => { e.preventDefault(); handleStopRecording({ fromAuto: false }); });
+  startBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    handleStartToggle();
+  });
+  stopBtn?.addEventListener("click", (e) => {
+    e.preventDefault();
+    handleStopRecording({ fromAuto: false });
+  });
   attachVoiceToggle();
 
   // chat controls
@@ -247,6 +229,7 @@
   // ==============================
   // Chat management
   // ==============================
+
   async function ensureServerChat() {
     const r = await fetch(NEW_CHAT_ROUTE, { credentials: "same-origin" });
     if (!r.ok) throw new Error(await r.text());
@@ -258,7 +241,13 @@
   async function newChat() {
     forceCloseSSE("new_chat");
     const id = await ensureServerChat();
-    upsertChat(id, { id, title: "New Chat", messages: [], archived: false, serverSynced: true });
+    upsertChat(id, {
+      id,
+      title: "New Chat",
+      messages: [],
+      archived: false,
+      serverSynced: true,
+    });
     setCurrentChat(id);
     renderChatHeader();
     renderMessages();
@@ -279,7 +268,9 @@
     state.currentChatID = null;
     saveSession(state);
     const remaining = Object.keys(state.chats).sort(
-      (a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0)
+      (a, b) =>
+        (state.chats[b].lastUpdatedAt || 0) -
+        (state.chats[a].lastUpdatedAt || 0)
     );
     if (remaining.length === 0) {
       await newChat();
@@ -303,10 +294,13 @@
   }
 
   // Sidebar rendering
+
   function renderChatList() {
     if (!chatListEl) return;
     const ids = Object.keys(state.chats).sort(
-      (a, b) => (state.chats[b].lastUpdatedAt || 0) - (state.chats[a].lastUpdatedAt || 0)
+      (a, b) =>
+        (state.chats[b].lastUpdatedAt || 0) -
+        (state.chats[a].lastUpdatedAt || 0)
     );
     chatListEl.innerHTML = "";
     ids.forEach((id) => {
@@ -315,7 +309,10 @@
       item.className = "chat-list__item";
       item.type = "button";
       item.setAttribute("data-chatid", id);
-      item.setAttribute("aria-current", id === state.currentChatID ? "true" : "false");
+      item.setAttribute(
+        "aria-current",
+        id === state.currentChatID ? "true" : "false"
+      );
       const archived = !!c?.archived;
       item.dataset.archived = archived ? "true" : "false";
       if (archived) {
@@ -330,11 +327,13 @@
       chatListEl.appendChild(item);
     });
   }
+
   function renderChatHeader() {
     const c = getCurrentChat();
-    if (chatTitleEl) chatTitleEl.textContent = c?.title || "Project David";
+    if (chatTitleEl) chatTitleEl.textContent = c?.title || "Obscura";
     setComposerEnabled(!c?.archived);
   }
+
   function renderMessages() {
     const c = getCurrentChat();
     if (!messagesEl) return;
@@ -343,6 +342,7 @@
     for (const m of msgs) appendMessageBubble(m.role, m.content);
     scrollMessagesToBottom();
   }
+
   function appendMessageBubble(role, content) {
     const wrap = document.createElement("div");
     wrap.className = `msg msg--${role}`;
@@ -352,6 +352,7 @@
     renderMarkdownInto(bubble, content);
     messagesEl.appendChild(wrap);
   }
+
   function updateLastAssistantBubble(text) {
     const nodes = messagesEl.querySelectorAll(".msg--assistant .msg__bubble");
     const target = nodes[nodes.length - 1];
@@ -361,6 +362,7 @@
     }
     renderMarkdownInto(target, text || "");
   }
+
   function scrollMessagesToBottom() {
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
@@ -475,10 +477,14 @@
     if (!chat || !state.currentChatID || chat.archived) return;
 
     const messageContent = userText ?? "";
-    const newMessages = [...(chat.messages || []), { role: "user", content: messageContent }];
-    const title = (chat.title === "New Chat" || !chat.messages?.length)
-      ? (messageContent || "New Chat").slice(0, 48)
-      : chat.title;
+    const newMessages = [
+      ...(chat.messages || []),
+      { role: "user", content: messageContent },
+    ];
+    const title =
+      chat.title === "New Chat" || !chat.messages?.length
+        ? (messageContent || "New Chat").slice(0, 48)
+        : chat.title;
 
     upsertChat(state.currentChatID, { messages: newMessages, title });
 
@@ -498,8 +504,9 @@
   }
 
   // ==============================
-  // Voice toggle (SR with VAD fallback)
+  // Voice toggle (MicVAD)
   // ==============================
+
   function attachVoiceToggle() {
     if (!voiceToggleBtn) return;
     updateVoiceToggleUi();
@@ -513,258 +520,106 @@
       updateVoiceToggleUi();
     });
   }
+
   async function enableVoice() {
     try {
-      await navigator.mediaDevices.getUserMedia({ audio: true });
-    } catch (e) {
-      alert("Please allow microphone access to enable Voice mode.");
-      return;
-    }
-    await startVADFallback(); // start detection (does NOT start recording yet)
-
-    // Initialize Web Speech only if not forcing VAD
-    try {
-      if (!FORCE_VAD) {
-        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-        if (SR) {
-          initSpeechRecognition(SR);
-          safeStartRecognition();
-        }
+      // Make sure the VAD library is loaded
+      if (!window.vad || !vad.MicVAD) {
+        console.error("VAD library (vad.MicVAD) not loaded");
+        alert("Voice detection failed to load. Please refresh the page.");
+        return;
       }
-    } catch {}
 
-    voiceEnabled = true;
+      // Create a MicVAD instance
+      micVAD = await vad.MicVAD.new({
+        model: "v5",
+
+        // Called when the user STARTS talking
+        onSpeechStart: () => {
+          console.log("VAD: speech start detected");
+          setStatusLabel("Speaking…");
+
+          // Interrupt AI / audio if needed
+          try {
+            interruptAI();
+          } catch (e) {
+            console.log("Interrupt on VAD onset failed:", e);
+          }
+
+          // IMPORTANT: we do NOT start recording here anymore.
+          // Recording is already running from enableVoice().
+        },
+
+        // Called when the user STOPS talking for long enough
+        onSpeechEnd: async () => {
+          console.log("VAD: speech end detected");
+          setStatusLabel("Listening…");
+
+          if (isRecording()) {
+            try {
+              // Use your existing stop logic (auto mode)
+              await handleStopRecording({ fromAuto: true });
+            } catch (e) {
+              console.log("VAD stop recording failed:", e);
+            }
+          }
+        },
+
+        // Tell it where to find the model + wasm
+        onnxWASMBasePath:
+          "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/",
+        baseAssetPath:
+          "https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/",
+      });
+
+      // Start VAD listening to the mic
+      micVAD.start();
+
+      // Start recording immediately so we include some pre-speech audio.
+      // This acts like an audio buffer: we're already recording before the first word.
+      if (!isRecording()) {
+        await handleStartRecording().catch((err) =>
+          console.log("Initial recording start failed:", err)
+        );
+      }
+
+      voiceEnabled = true;
+      setStatusLabel("Listening…");
+      console.log("MicVAD started, recording pre-roll audio");
+    } catch (e) {
+      console.error("Failed to enable voice:", e);
+      alert("Please allow microphone access to enable Voice mode.");
+    }
   }
+
   async function disableVoice() {
     voiceEnabled = false;
-    if (recognition) {
-      recognitionManuallyPaused = true;
-      try { recognition.stop(); } catch {}
+
+    // Stop MicVAD and release the mic
+    if (micVAD) {
+      try {
+        micVAD.pause(); // stops listening
+      } catch (e) {
+        console.error("Failed to pause VAD:", e);
+      }
+      micVAD = null;
     }
-    if (typeof vadStopFn === "function") {
-      try { vadStopFn(); } catch {}
-      vadStopFn = null;
-    }
+
+    setStatus("idle");
+    setStatusLabel("Voice off");
   }
+
   function updateVoiceToggleUi() {
     if (!voiceToggleBtn) return;
-    voiceToggleBtn.textContent = voiceEnabled ? "Disable Voice" : "Enable Voice";
+    voiceToggleBtn.textContent = voiceEnabled
+      ? "Disable Voice"
+      : "Enable Voice";
     voiceToggleBtn.classList.toggle("button--active", voiceEnabled);
   }
 
   // ==============================
-  // SpeechRecognition (used only to wake/interrupt if enabled)
+  // Networking — POST raw text
   // ==============================
-  function initSpeechRecognition(SR) {
-    if (recognition) return; // init once
-    recognition = new SR();
-    recognition.lang = VOICE_LANG;
-    recognition.continuous = true;
-    recognition.interimResults = false;
-    recognition.maxAlternatives = 1;
-
-    recognition.onstart = () => { recognitionRunning = true; sLog("SpeechRecognition started"); };
-    recognition.onend = () => {
-      recognitionRunning = false;
-      sLog("SpeechRecognition ended; manuallyPaused?", recognitionManuallyPaused);
-      if (voiceEnabled && !recognitionManuallyPaused) setTimeout(safeStartRecognition, 600);
-    };
-    recognition.onaudiostart = () => {
-      if (!voiceEnabled) return;
-      sLog("SR onaudiostart → interrupt AI");
-      interruptAI();
-    };
-    recognition.onresult = () => {};
-    recognition.onerror = (e) => {
-      const err = e?.error;
-      sLog("SpeechRecognition error:", err);
-      if (err === "network") {
-        const now = Date.now();
-        if (!srErrorWindowStart || now - srErrorWindowStart > SR_ERROR_WINDOW_MS) {
-          srErrorWindowStart = now;
-          srNetworkErrorCount = 0;
-        }
-        srNetworkErrorCount++;
-        if (srNetworkErrorCount >= SR_NETWORK_ERROR_LIMIT && voiceEnabled) {
-          sLog("Persistent SR network errors → continue with VAD only");
-          recognitionManuallyPaused = true;
-          try { recognition.stop(); } catch {}
-        }
-      }
-      if (err === "not-allowed" || err === "service-not-allowed") {
-        recognitionManuallyPaused = true;
-        try { recognition.stop(); } catch {}
-      }
-    };
-    document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible" && voiceEnabled && !recognitionManuallyPaused) {
-        safeStartRecognition();
-      }
-    });
-  }
-  function safeStartRecognition() {
-    if (!recognition || recognitionRunning) return;
-    try { recognition.start(); } catch {}
-  }
-  function pauseRecognitionForRecording() {
-    if (!recognition || !voiceEnabled) return;
-    recognitionManuallyPaused = true;
-    if (recognitionRunning) { try { recognition.stop(); } catch {} }
-  }
-  function resumeRecognitionAfterRecording() {
-    if (!recognition || !voiceEnabled) return;
-    recognitionManuallyPaused = false;
-    safeStartRecognition();
-  }
-
-  // ==============================
-  // VAD (auto start/stop recording)
-  // ==============================
-  async function startVADFallback() {
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          noiseSuppression: false,
-          echoCancellation: false,
-          autoGainControl: false
-        }
-      });
-
-      const ac = new (window.AudioContext || window.webkitAudioContext)();
-      if (ac.state === "suspended") {
-        try { await ac.resume(); } catch {}
-      }
-      const src = ac.createMediaStreamSource(stream);
-      const analyser = ac.createAnalyser();
-      analyser.fftSize = 2048;
-      src.connect(analyser);
-
-      const buf = new Float32Array(analyser.fftSize);
-
-      sLog("VAD starting (with calibration)...");
-      setStatusLabel("Listening…");
-
-      // ---- Calibration for ambient ----
-      let calSamples = [];
-      const calStart = performance.now();
-      while (performance.now() - calStart < VAD_CALIBRATION_MS) {
-        analyser.getFloatTimeDomainData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-        const rms = Math.sqrt(sum / buf.length);
-        calSamples.push(rms);
-        await new Promise(r => requestAnimationFrame(r));
-      }
-      const calMean = calSamples.reduce((a, b) => a + b, 0) / Math.max(1, calSamples.length);
-      const calVar = calSamples.reduce((acc, v) => acc + Math.pow(v - calMean, 2), 0) / Math.max(1, calSamples.length);
-      const calStd = Math.sqrt(calVar);
-      vadStats.calMean = calMean;
-      sLog("VAD calibrated:", { mean: calMean.toFixed(4), std: calStd.toFixed(4) });
-
-      // ---- Loop ----
-      let emaRms = calMean;
-      let lastAboveTs = 0;
-      let speaking = false;
-
-      // Use real delta time to accumulate active speech (prevents 0ms under RAF throttling)
-      let lastLoopTs = performance.now();
-
-      let rafId = 0;
-      function loop() {
-        if (!voiceEnabled) return;
-
-        analyser.getFloatTimeDomainData(buf);
-        let sum = 0;
-        for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
-        const instRms = Math.sqrt(sum / buf.length);
-
-        // EMA smoothing
-        emaRms = VAD_RMS_SMOOTH * instRms + (1 - VAD_RMS_SMOOTH) * emaRms;
-
-        // Dynamic threshold
-        const dynThresh = Math.max(calMean + VAD_STD_K * calStd, VAD_THRESH);
-
-        const now = performance.now();
-        const dt = Math.max(0, now - lastLoopTs);
-        lastLoopTs = now;
-
-        // --- START gating (require continuous above for VAD_START_CONFIRM_MS) ---
-        if (emaRms > dynThresh) {
-          if (!startCandidateAt) startCandidateAt = now;
-          lastAboveTs = now;
-
-          // If not yet speaking, confirm start after continuous above-threshold window
-          if (!speaking && (now - startCandidateAt) >= VAD_START_CONFIRM_MS) {
-            speaking = true;
-            talking = true;
-            setStatusLabel("Speaking…");
-
-            // Reset VAD quality counters at utterance start
-            vadStats.peakRms = 0;
-            vadStats.activeSpeechMs = 0;
-
-            // On voice onset, interrupt any current stream/tts and start a fresh recording.
-            try {
-              interruptAI();
-            } catch (e) {
-              sLog("Interrupt on VAD onset failed:", e);
-              if (!isRecording()) {
-                pauseRecognitionForRecording();
-                handleStartRecording().catch((err) => sLog("VAD start recording failed:", err));
-              }
-            }
-          }
-        } else {
-          startCandidateAt = 0; // reset start candidate when we drop below
-          // only flip to not speaking after hang window
-          if (speaking && (now - lastAboveTs > VAD_HANG_MS)) {
-            speaking = false;
-            talking = false;
-            setStatusLabel("Listening…");
-          }
-        }
-
-        // --- While recording, track quality metrics ---
-        if (isRecording()) {
-          // Track peak RMS (use instantaneous, not EMA)
-          if (instRms > vadStats.peakRms) vadStats.peakRms = instRms;
-
-          // Accumulate time we are actually above threshold (use real dt)
-          if (emaRms > dynThresh) {
-            vadStats.activeSpeechMs += dt;
-          }
-
-          const recMs = now - recordingStartedAt;
-          const silenceMs = now - lastAboveTs;
-
-          // Require at least MIN_SPEECH_MS before auto-stop can fire
-          if (!autoStopping && recMs > Math.max(AUTO_STOP_MIN_MS, MIN_SPEECH_MS) && silenceMs > AUTO_STOP_SILENCE_MS) {
-            autoStopping = true;
-            sLog(`Auto-stop: silence ${Math.round(silenceMs)}ms (rec ${Math.round(recMs)}ms) → stop & maybe send`);
-            handleStopRecording({ fromAuto: true }).finally(() => {
-              autoStopping = false;
-              resumeRecognitionAfterRecording();
-            });
-          }
-        }
-
-        rafId = requestAnimationFrame(loop);
-      }
-      rafId = requestAnimationFrame(loop);
-
-      vadStopFn = () => {
-        cancelAnimationFrame(rafId);
-        try { ac.close(); } catch {}
-        try { stream.getTracks().forEach(t => t.stop()); } catch {}
-        setStatus("idle");
-      };
-
-    } catch (e) {
-      sLog("VAD init failed:", e);
-      alert("Failed to initialize Voice Activity Detection. Check mic permissions.");
-    }
-  }
-
   async function postRawTextMessage(chatID, message) {
     const controller = new AbortController();
     const POST_WAIT_MS = 800;
@@ -789,21 +644,25 @@
     });
 
     const result = await Promise.race([
-      fetchPromise.then(async (res) => {
-        if (!res.ok) {
-          const msg = (await res.text().catch(() => "")) || "";
-          const error = new Error(`POST ${RAW_TEXT_ROUTE} failed: ${res.status} ${msg}`);
-          error.status = res.status;
-          error.responseText = msg;
-          throw error;
-        }
-        return "ok";
-      }).catch((err) => {
-        if (err?.name === "AbortError") {
-          return "timeout";
-        }
-        throw err;
-      }),
+      fetchPromise
+        .then(async (res) => {
+          if (!res.ok) {
+            const msg = (await res.text().catch(() => "")) || "";
+            const error = new Error(
+              `POST ${RAW_TEXT_ROUTE} failed: ${res.status} ${msg}`
+            );
+            error.status = res.status;
+            error.responseText = msg;
+            throw error;
+          }
+          return "ok";
+        })
+        .catch((err) => {
+          if (err?.name === "AbortError") {
+            return "timeout";
+          }
+          throw err;
+        }),
       timeoutPromise,
     ]);
 
@@ -811,7 +670,9 @@
 
     if (result === "timeout") {
       controller.abort();
-      sLog("Text submission POST timed out; assuming server accepted request.");
+      sLog(
+        "Text submission POST timed out; assuming server accepted request."
+      );
     }
     return result;
   }
@@ -844,7 +705,10 @@
           await postRawTextMessage(state.currentChatID, message);
           break;
         } catch (err) {
-          if (attempt + 1 < maxAttempts && isServerDesyncError(err)) {
+          if (
+            attempt + 1 < maxAttempts &&
+            isServerDesyncError(err)
+          ) {
             await handleServerDesync("raw_text_retry");
             setStatus("processing");
             attempt += 1;
@@ -874,34 +738,35 @@
   // ==============================
   async function handleStartToggle() {
     if (composerLocked) return;
-    try { if (audioEl && !audioEl.paused) audioEl.pause(); } catch {}
+    try {
+      if (audioEl && !audioEl.paused) audioEl.pause();
+    } catch {}
     forceCloseSSE("start_toggle");
 
     if (isRecording()) {
       await cancelRecording();
       return;
     }
-    if (voiceEnabled) pauseRecognitionForRecording();
     await handleStartRecording();
   }
 
   async function handleStartRecording() {
     if (isRecording()) return; // guard against double-starts
     try {
-      activeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      activeStream = await navigator.mediaDevices.getUserMedia({
+        audio: true,
+      });
 
       const mime = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
         ? "audio/webm;codecs=opus"
         : undefined;
 
-      mediaRecorder = new MediaRecorder(activeStream, mime ? { mimeType: mime } : undefined);
+      mediaRecorder = new MediaRecorder(
+        activeStream,
+        mime ? { mimeType: mime } : undefined
+      );
       mediaChunks = [];
       recordingStartedAt = performance.now();
-      lastSpeechTs = performance.now();
-
-      // Reset VAD stats for this take (keep calMean from calibration)
-      vadStats.peakRms = 0;
-      vadStats.activeSpeechMs = 0;
 
       mediaRecorder.addEventListener("dataavailable", ({ data }) => {
         if (data?.size) mediaChunks.push(data);
@@ -911,7 +776,9 @@
         mediaRecorder.addEventListener(
           "stop",
           () => {
-            const blob = new Blob(mediaChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+            const blob = new Blob(mediaChunks, {
+              type: mediaRecorder.mimeType || "audio/webm",
+            });
             resolve(blob);
           },
           { once: true }
@@ -927,7 +794,6 @@
       alert("Microphone permission is required.");
       resetRecordingState();
       refreshButtonsFromState();
-      if (voiceEnabled) resumeRecognitionAfterRecording();
     }
   }
 
@@ -961,40 +827,27 @@
       if (!fromAuto) {
         // Manual stop path: be permissive so Start/Stop always works
         if (!blobOk || utteranceMs < 300) {
-          sLog(`Manual stop: discarding (blobOk=${blobOk}, ms=${Math.round(utteranceMs)})`);
+          sLog(
+            `Manual stop: discarding (blobOk=${blobOk}, ms=${Math.round(
+              utteranceMs
+            )})`
+          );
           setStatus("idle");
           resetRecordingState();
           refreshButtonsFromState();
-          if (voiceEnabled) resumeRecognitionAfterRecording();
           return;
         }
       } else {
-        // Auto (VAD) path: apply quality gates
+        // Auto (VAD) path: simple duration gate
         if (utteranceMs < MIN_SPEECH_MS) {
-          sLog(`Discarding short utterance: ${Math.round(utteranceMs)}ms < ${MIN_SPEECH_MS}ms`);
+          sLog(
+            `Discarding short utterance: ${Math.round(
+              utteranceMs
+            )}ms < ${MIN_SPEECH_MS}ms`
+          );
           setStatus("idle");
           resetRecordingState();
           refreshButtonsFromState();
-          if (voiceEnabled) resumeRecognitionAfterRecording();
-          return;
-        }
-
-        // Quality gates (prevent uploading near-silence)
-        const peak = vadStats.peakRms || 0;
-        const ambient = Math.max(vadStats.calMean || 0, SNR_EPS);
-        const snrDb = 20 * Math.log10((peak + SNR_EPS) / ambient);
-        const activeOk = vadStats.activeSpeechMs >= MIN_ACTIVE_SPEECH_MS;
-        const peakOk = peak >= MIN_PEAK_RMS;
-        const snrOk = snrDb >= MIN_SNR_DB;
-
-        sLog(`VAD quality — peak=${peak.toFixed(4)} snrDb=${Number.isFinite(snrDb)?snrDb.toFixed(1):'-'} activeMs=${Math.round(vadStats.activeSpeechMs)} (ok? p:${peakOk} snr:${snrOk} act:${activeOk})`);
-
-        if (!(activeOk && peakOk && snrOk)) {
-          sLog("Discarding due to failing quality gates (likely silence/noise).");
-          setStatus("idle");
-          resetRecordingState();
-          refreshButtonsFromState();
-          if (voiceEnabled) resumeRecognitionAfterRecording();
           return;
         }
       }
@@ -1010,7 +863,10 @@
 
       while (attempt < maxPostAttempts) {
         const ctrl = new AbortController();
-        const postTimer = setTimeout(() => ctrl.abort("post_timeout"), POST_TIMEOUT_MS);
+        const postTimer = setTimeout(
+          () => ctrl.abort("post_timeout"),
+          POST_TIMEOUT_MS
+        );
         try {
           postRes = await fetch(STREAM_ROUTE, {
             method: "POST",
@@ -1020,7 +876,10 @@
               "Cache-Control": "no-cache",
             },
             credentials: "same-origin",
-            body: JSON.stringify({ audioBase64, chatID: state.currentChatID }),
+            body: JSON.stringify({
+              audioBase64,
+              chatID: state.currentChatID,
+            }),
             signal: ctrl.signal,
           });
         } finally {
@@ -1032,29 +891,42 @@
         }
 
         const status = postRes?.status;
-        const msg = (await postRes?.text()?.catch(() => "")) || "";
-        if (attempt + 1 < maxPostAttempts && typeof status === "number" && status >= 500) {
+        const msg =
+          (await postRes?.text()?.catch(() => "")) || "";
+        if (
+          attempt + 1 < maxPostAttempts &&
+          typeof status === "number" &&
+          status >= 500
+        ) {
           await handleServerDesync("audio_post_retry");
           setStatus("processing");
           attempt += 1;
           continue;
         }
-        const error = new Error(`POST ${STREAM_ROUTE} failed: ${status} ${msg}`);
+        const error = new Error(
+          `POST ${STREAM_ROUTE} failed: ${status} ${msg}`
+        );
         error.status = status;
         error.responseText = msg;
         throw error;
       }
 
       if (!postRes?.ok) {
-        const finalError = new Error(`POST ${STREAM_ROUTE} failed after retries`);
+        const finalError = new Error(
+          `POST ${STREAM_ROUTE} failed after retries`
+        );
         finalError.status = postRes?.status;
         throw finalError;
       }
 
       forceCloseSSE("audio_submit");
       const { transcript } = await postRes.json();
-      const messageText = typeof transcript === "string" ? transcript : "";
-      sLog("Transcript from POST:", messageText.slice(0, 160) || "<empty>");
+      const messageText =
+        typeof transcript === "string" ? transcript : "";
+      sLog(
+        "Transcript from POST:",
+        messageText.slice(0, 160) || "<empty>"
+      );
 
       await commitUserMessage(messageText);
     } catch (err) {
@@ -1064,7 +936,17 @@
     } finally {
       resetRecordingState();
       refreshButtonsFromState();
-      if (voiceEnabled) resumeRecognitionAfterRecording();
+
+      // If this stop was triggered by VAD and voice mode is still on,
+      // immediately start a new recording so we keep buffering audio
+      // for the next utterance.
+      if (fromAuto && voiceEnabled) {
+        try {
+          await handleStartRecording();
+        } catch (e) {
+          console.error("Failed to restart recording after VAD stop:", e);
+        }
+      }
     }
   }
 
@@ -1077,12 +959,13 @@
       if (isRecording()) mediaRecorder.stop();
     } catch {}
     if (activeStream) {
-      try { activeStream.getTracks().forEach((t) => t.stop()); } catch {}
+      try {
+        activeStream.getTracks().forEach((t) => t.stop());
+      } catch {}
       activeStream = null;
     }
     mediaRecorder = null;
     mediaChunks = [];
-    if (voiceEnabled) resumeRecognitionAfterRecording();
   }
   function isRecording() {
     return mediaRecorder && mediaRecorder.state === "recording";
@@ -1098,7 +981,7 @@
     sLog("Opening GET SSE:", STREAM_ROUTE, "chatID=", id);
 
     const IDLE_TIMEOUT_MS = 20000;
-    const HARD_CLOSE_MS    = 120000;
+    const HARD_CLOSE_MS = 120000;
 
     return new Promise((resolve, reject) => {
       const url = `${STREAM_ROUTE}?chatID=${encodeURIComponent(id)}`;
@@ -1106,28 +989,40 @@
       currentEventSource = es;
 
       let lastActivity = Date.now();
-      let hardCloseAt  = Date.now() + HARD_CLOSE_MS;
+      let hardCloseAt = Date.now() + HARD_CLOSE_MS;
       let lastAnswerText = "";
       let sawAnyData = false;
       let resolved = false;
 
       function clearAll() {
-        try { clearInterval(watchdog); } catch {}
-        try { window.removeEventListener(SSE_FORCE_EVENT, onForcedClose); } catch {}
+        try {
+          clearInterval(watchdog);
+        } catch {}
+        try {
+          window.removeEventListener(SSE_FORCE_EVENT, onForcedClose);
+        } catch {}
       }
       function end(ok, why = "") {
         if (resolved) return;
         resolved = true;
         clearAll();
-        try { es.close(); } catch {}
+        try {
+          es.close();
+        } catch {}
         if (currentEventSource === es) currentEventSource = null;
-        sLog(`SSE ended ok=${ok} ${why ? "(" + why + ")" : ""}`);
+        sLog(
+          `SSE ended ok=${ok} ${why ? "(" + why + ")" : ""}`
+        );
         ok ? resolve() : reject(new Error("SSE error: " + why));
       }
-      function bumpActivity() { lastActivity = Date.now(); }
+      function bumpActivity() {
+        lastActivity = Date.now();
+      }
 
       const onForcedClose = () => end(true, "externally_closed");
-      window.addEventListener(SSE_FORCE_EVENT, onForcedClose, { once: true });
+      window.addEventListener(SSE_FORCE_EVENT, onForcedClose, {
+        once: true,
+      });
 
       const watchdog = setInterval(() => {
         const now = Date.now();
@@ -1146,12 +1041,21 @@
         setStatusLabel(`Processing${stage}`);
       };
 
-      es.addEventListener("open", () => { bumpActivity(); });
-      es.addEventListener("status", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
-      es.addEventListener("subStatus", (e) => { sawAnyData = true; handleStatus(safeParse(e.data)); });
+      es.addEventListener("open", () => {
+        bumpActivity();
+      });
+      es.addEventListener("status", (e) => {
+        sawAnyData = true;
+        handleStatus(safeParse(e.data));
+      });
+      es.addEventListener("subStatus", (e) => {
+        sawAnyData = true;
+        handleStatus(safeParse(e.data));
+      });
 
       es.addEventListener("token", (e) => {
-        bumpActivity(); sawAnyData = true;
+        bumpActivity();
+        sawAnyData = true;
         const data = safeParse(e.data);
         if (typeof data?.text === "string") {
           lastAnswerText = data.text;
@@ -1163,16 +1067,23 @@
         const c = getCurrentChat();
         const msgs = [...(c.messages || [])];
         if (!msgs.length || msgs[msgs.length - 1].role !== "assistant") {
-          msgs.push({ role: "assistant", content: lastAnswerText });
+          msgs.push({
+            role: "assistant",
+            content: lastAnswerText,
+          });
         } else {
-          msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
+          msgs[msgs.length - 1] = {
+            role: "assistant",
+            content: lastAnswerText,
+          };
         }
         upsertChat(state.currentChatID, { messages: msgs });
         scrollMessagesToBottom();
       });
 
       es.addEventListener("answer", (e) => {
-        bumpActivity(); sawAnyData = true;
+        bumpActivity();
+        sawAnyData = true;
         const data = safeParse(e.data);
         lastAnswerText = data?.answer || lastAnswerText;
 
@@ -1181,16 +1092,23 @@
         const c = getCurrentChat();
         const msgs = [...(c.messages || [])];
         if (!msgs.length || msgs[msgs.length - 1].role !== "assistant") {
-          msgs.push({ role: "assistant", content: lastAnswerText });
+          msgs.push({
+            role: "assistant",
+            content: lastAnswerText,
+          });
         } else {
-          msgs[msgs.length - 1] = { role: "assistant", content: lastAnswerText };
+          msgs[msgs.length - 1] = {
+            role: "assistant",
+            content: lastAnswerText,
+          };
         }
         upsertChat(state.currentChatID, { messages: msgs });
         scrollMessagesToBottom();
       });
 
       es.addEventListener("finishedParagraph", (e) => {
-        bumpActivity(); sawAnyData = true;
+        bumpActivity();
+        sawAnyData = true;
         const data = safeParse(e.data);
         // ordered enqueue if server sends index
         if (Number.isInteger(data?.index)) {
@@ -1208,7 +1126,10 @@
       es.addEventListener("error", (e) => {
         const payload = safeParse(e?.data || "");
         if (payload?.message) {
-          appendMessageBubble("assistant", `**Error:** ${payload.message}`);
+          appendMessageBubble(
+            "assistant",
+            `**Error:** ${payload.message}`
+          );
           setStatus("error");
           end(false, "server_error_event");
         } else {
@@ -1242,7 +1163,6 @@
     setStatusLabel("Listening…");
 
     if (!isRecording()) {
-      if (voiceEnabled) pauseRecognitionForRecording();
       handleStartRecording().finally(() => {
         interrupting = false;
       });
@@ -1252,9 +1172,13 @@
   }
   function forceCloseSSE(reason = "client_close") {
     if (currentEventSource) {
-      try { currentEventSource.close(); } catch {}
+      try {
+        currentEventSource.close();
+      } catch {}
       currentEventSource = null;
-      try { window.dispatchEvent(new CustomEvent(SSE_FORCE_EVENT)); } catch {}
+      try {
+        window.dispatchEvent(new CustomEvent(SSE_FORCE_EVENT));
+      } catch {}
       sLog("SSE: force-closed (" + reason + ")");
     }
   }
@@ -1280,8 +1204,10 @@
     try {
       await ensureHighlighting();
       if (window.hljs) {
-        el.querySelectorAll("pre code").forEach(block => {
-          try { window.hljs.highlightElement(block); } catch {}
+        el.querySelectorAll("pre code").forEach((block) => {
+          try {
+            window.hljs.highlightElement(block);
+          } catch {}
         });
       }
     } catch {}
@@ -1294,13 +1220,17 @@
           delimiters: [
             { left: "$$", right: "$$", display: true },
             { left: "\\[", right: "\\]", display: true },
-            { left: "$",  right: "$",  display: false },
+            { left: "$", right: "$", display: false },
             { left: "\\(", right: "\\)", display: false },
           ],
           throwOnError: false,
           strict: "warn",
           trust: false,
-          macros: { "\\RR": "\\mathbb{R}", "\\NN": "\\mathbb{N}", "\\ZZ": "\\mathbb{Z}" }
+          macros: {
+            "\\RR": "\\mathbb{R}",
+            "\\NN": "\\mathbb{N}",
+            "\\ZZ": "\\mathbb{Z}",
+          },
         });
       }
     } catch {}
@@ -1314,9 +1244,11 @@
     link.setAttribute("data-key", key);
     document.head.appendChild(link);
   }
+
   function loadScriptOnce(src, key) {
     return new Promise((resolve, reject) => {
-      if (document.querySelector(`script[data-key="${key}"]`)) return resolve();
+      if (document.querySelector(`script[data-key="${key}"]`))
+        return resolve();
       const s = document.createElement("script");
       s.src = src;
       s.async = true;
@@ -1326,21 +1258,26 @@
       document.head.appendChild(s);
     });
   }
+
   async function loadScriptWithFallback(urls, key, timeoutMs = 8000) {
     for (const url of urls) {
       try {
         await Promise.race([
           loadScriptOnce(url, key),
-          new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), timeoutMs))
+          new Promise((_, rej) =>
+            setTimeout(() => rej(new Error("timeout")), timeoutMs)
+          ),
         ]);
         return true;
       } catch {}
     }
     return false;
   }
+
   function normalizeFences(md) {
     return (md || "").replace(/[‘’‛‚`´]/g, "`");
   }
+
   async function ensureMarkdown() {
     if (MD_READY) return;
     if (!window.marked) {
@@ -1348,7 +1285,7 @@
         [
           "https://cdn.jsdelivr.net/npm/marked/marked.min.js",
           "https://unpkg.com/marked@latest/marked.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/marked/14.1.2/marked.min.js"
+          "https://cdnjs.cloudflare.com/ajax/libs/marked/14.1.2/marked.min.js",
         ],
         "marked"
       );
@@ -1358,43 +1295,64 @@
         [
           "https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js",
           "https://unpkg.com/dompurify@3.0.6/dist/purify.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js"
+          "https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.6/purify.min.js",
         ],
         "dompurify"
       );
     }
     if (window.marked) {
       try {
-        marked.setOptions({ breaks: true, gfm: true, mangle: false, headerIds: true });
+        marked.setOptions({
+          breaks: true,
+          gfm: true,
+          mangle: false,
+          headerIds: true,
+        });
       } catch {}
     }
     MD_READY = true;
   }
+
   async function ensureHighlighting() {
     if (HL_READY) return;
-    loadCssOnce("https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css", "hljs-theme")
-      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css", "hljs-theme2");
-    const ok = window.hljs || await loadScriptWithFallback(
-      [
-        "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js",
-        "https://unpkg.com/highlight.js@11.9.0/build/highlight.min.js",
-        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"
-      ],
-      "hljs"
-    );
+    loadCssOnce(
+      "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css",
+      "hljs-theme"
+    ) ||
+      loadCssOnce(
+        "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github.min.css",
+        "hljs-theme2"
+      );
+    const ok =
+      window.hljs ||
+      (await loadScriptWithFallback(
+        [
+          "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/build/highlight.min.js",
+          "https://unpkg.com/highlight.js@11.9.0/build/highlight.min.js",
+          "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js",
+        ],
+        "hljs"
+      ));
     HL_READY = !!window.hljs;
   }
+
   async function ensureKatex() {
     if (KATEX_READY && window.katex && window.renderMathInElement) return;
-    loadCssOnce("https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css", "katex-css")
-      || loadCssOnce("https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css", "katex-css2");
+    loadCssOnce(
+      "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css",
+      "katex-css"
+    ) ||
+      loadCssOnce(
+        "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.css",
+        "katex-css2"
+      );
 
     if (!window.katex) {
       await loadScriptWithFallback(
         [
           "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js",
           "https://unpkg.com/katex@0.16.11/dist/katex.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js"
+          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/katex.min.js",
         ],
         "katex"
       );
@@ -1404,7 +1362,7 @@
         [
           "https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js",
           "https://unpkg.com/katex@0.16.11/dist/contrib/auto-render.min.js",
-          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js"
+          "https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.11/contrib/auto-render.min.js",
         ],
         "katex-auto"
       );
@@ -1416,11 +1374,18 @@
   // Helpers
   // ==============================
   function safeParse(s) {
-    try { return JSON.parse(s); } catch { return null; }
+    try {
+      return JSON.parse(s);
+    } catch {
+      return null;
+    }
   }
+
   function updateAudio(el, dataUrl) {
     if (!el) return;
-    const sliderVal = volumeSlider ? parseFloat(volumeSlider.value) : NaN;
+    const sliderVal = volumeSlider
+      ? parseFloat(volumeSlider.value)
+      : NaN;
     if (Number.isFinite(sliderVal)) {
       el.volume = Math.min(1, Math.max(0, sliderVal));
     }
@@ -1439,15 +1404,15 @@
   function refreshButtonsFromState() {
     if (composerLocked) {
       if (startBtn) startBtn.disabled = true;
-      if (stopBtn)  stopBtn.disabled  = true;
+      if (stopBtn) stopBtn.disabled = true;
       return;
     }
     const rec = isRecording();
     if (startBtn) startBtn.disabled = rec;
-    if (stopBtn)  stopBtn.disabled  = !rec;
+    if (stopBtn) stopBtn.disabled = !rec;
   }
+
   // Kept for compatibility if something else calls it
-  function setButtonsState() { refreshButtonsFromState(); }
 
   function setStatus(state) {
     if (!statusEl) return;
@@ -1455,25 +1420,34 @@
     statusEl.dataset.state = state;
     statusEl.textContent = label;
   }
+
   function setStatusLabel(text) {
     if (!statusEl) return;
     statusEl.dataset.state = "processing";
     statusEl.textContent = text;
   }
+
   function resetRecordingState() {
     mediaRecorder = null;
     mediaChunks = [];
-    if (activeStream) { activeStream.getTracks().forEach((t) => t.stop()); activeStream = null; }
+    if (activeStream) {
+      activeStream.getTracks().forEach((t) => t.stop());
+      activeStream = null;
+    }
     refreshButtonsFromState();
   }
+
   async function blobToBase64(blob) {
     const buffer = await blob.arrayBuffer();
     let binary = "";
     const bytes = new Uint8Array(buffer);
     const chunkSize = 0x8000;
     for (let i = 0; i < bytes.length; i += chunkSize) {
-      binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+      binary += String.fromCharCode(
+        ...bytes.subarray(i, i + chunkSize)
+      );
     }
     return window.btoa(binary);
   }
+
 })();

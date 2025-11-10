@@ -27,7 +27,7 @@
       <!-- Main: conversation -->
       <section class="chat">
         <header class="chat__header">
-          <h1 class="chat__title" id="chatTitle">Project David</h1>
+          <h1 class="chat__title" id="chatTitle">Obscura</h1>
           <span id="status" class="panel__status" data-state="idle">Idle</span>
         </header>
 
@@ -74,6 +74,11 @@
       </section>
     </main>
 
+    <!-- VAD dependencies (global `vad` namespace) -->
+    <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.22.0/dist/ort.wasm.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@ricky0123/vad-web@0.0.29/dist/bundle.min.js"></script>
+
+    <!-- Your app code – runs after VAD is loaded -->
     <script src="/app.js" defer></script>
   </body>
 </html>

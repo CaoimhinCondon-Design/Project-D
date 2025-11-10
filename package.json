@@ -8,9 +8,13 @@
     "dev": "node --watch server.js"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.0",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "openai": "^6.3.0",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "prisma": "^6.19.0"
   }
 }
