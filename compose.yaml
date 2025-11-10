@@ -5,20 +5,42 @@ services:
       context: .
       dockerfile: Dockerfile
 
-    # Load env vars from your .env file (PORT, OPENAI_API_KEY, etc.)
+    # Load all variables from .env
     env_file:
       - .env
 
-    # You can override or add environment variables here
-    # These win over values in .env if duplicated.
     environment:
       NODE_ENV: production
-      # If you ever want to override PORT:
-      # PORT: 3000
+      # This will come from .env → DATABASE_URL=...
+      DATABASE_URL: ${DOCKER_DATABASE_URL}
 
-    # Host:Container → app listens on 3000 inside the container
     ports:
       - "3000:3000"
 
-    # Optional but nice so it restarts if it crashes
     restart: unless-stopped
+
+    depends_on:
+      - db
+
+  db:
+    image: postgres:16
+    container_name: obscura-db
+
+    restart: always
+
+    env_file:
+      - .env
+
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+    ports:
+      - "5432:5432"
+
+volumes:
+  pgdata:
