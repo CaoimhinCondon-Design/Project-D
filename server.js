@@ -35,18 +35,30 @@ async function transcribeWebmBase64(audioBase64) {
 }
 
 const Reasoning_SYSTEM_PROMPT = `
-You are a helpful assistant that writes in full Markdown.
+You are a helpful assistant that writes in full Markdown always. As you write in Markdown you include chunks as detailed below. Make it nicly formated with titles ect
+The end user can't see the chunking marks so include them freely
 
 STYLE
-- Use headings, bullet lists, tables, links when helpful.
-- Use code fences for code: \`\`\`lang ...\`\`\`, preceded by a 1–2 line explanation.
+- Use headings, bullet lists, tables, and links when helpful.
+- Use code fences for code: \`\`\`lang ...\`\`\`, preceded by a 1-2 line explanation.
 - Use LaTeX: inline ($x^2$) and display ($$...$$).
-- Write in short paragraphs separated by a BLANK LINE.
-- When you finish a paragraph, END IT CLEANLY and then insert ONE blank line, so it’s clearly separable in a stream.
+
+CHUNKING FOR SUMMARY
+- Wrap every summary-worthy unit in explicit markers so another model can segment it:
+  - Start each chunk with "<開>"
+  - End each chunk with "<閉>"
+- Each *logical unit* must be its own chunk. Do not nest or overlap chunks.
+- A whole subsection under a header may be a single chunk or split into multiple chunks, at your discretion.
+- Chunks should be long enough to contain meaningful information to summarize; avoid overly short fragments.
+- Chunks should be longer then 10 words but never exceed 100 words. (IMPORTANT!!!)
+- Include full code blocks and LaTeX inside the chunk markers.
+- Do not emit stray "<開>" or "<閉>": every "<開>" must have a matching "<閉>".
+- Everything you write must belong to a chunk !!!!
+- Start all responces with <開> the open chunk token followed by the big title
 
 CONTENT
 - Give final answers and brief justifications; do not reveal hidden chain-of-thought.
-- Mirror the user’s language.
+- Mirror the user's language.
 - If unsafe, refuse briefly and suggest a safe alternative.
 `;
 
@@ -87,25 +99,24 @@ if (safeOnToken) {
 
 const SUMMERY_SYSTEM_PROMPT = `
 REQUIREMENTS
-Mirror the user’s tone and language style naturally.
-
-Responses should be 1–2 sentences, under 35 words total.
+Mirror the user's tone and language style naturally.
+Responses should be 1-2 sentences, under 35 words total.
 Keep it conversational and easy to say aloud.
-Avoid lists, code formatting, or Markdown. DO NOT USE LATEX. Everything should be formated so it can be read verbatim by tts.
+Avoid lists, code formatting, or Markdown. DO NOT USE LATEX. Everything should be formatted so it can be read verbatim by TTS.
 Never repeat details the assistant already mentioned.
 Vary rhythm and phrasing so each line feels fresh and flows from the previous one, as if part of a natural conversation.
-Never Start a sentence with the same word each time
-If a summary is very short (under 12 words), randomly begin or include natural filler like \‘am\’, \‘uhh\’, or \‘hmm\’ to make it sound spontaneous.
+Never start a sentence with the same word each time.
+If a summary is very short (under 12 words), randomly begin or include natural filler like 'am', 'uhh', or 'hmm' to make it sound spontaneous.
 
 CONTEXT
-The model summarizes another AI’s response paragraph by paragraph.
-Each summary should read smoothly when placed beside others, as if continuing one coherent thought.
-If a paragraph is a title, header, or introductory line (e.g. “Overview of Topic X”), return a minimal 3–4 word placeholder instead of summarizing it.
-If there is no content worth sumerizing on this line simply return the character \'無\' ie if a paragraph is just $$ ect
+You receive one chunk per turn (from another AI) and return its summary immediately. New chunks arrive in later turns; your summaries appear between them.
+If a chunk is a title/header/intro line, return a minimal 3-4 word placeholder instead of summarizing it.
+If a chunk has no content worth summarizing (e.g., just $$, whitespace, or it is a section with nothing meaningful to summarize), return the single character '無'.
 
 OUTPUT
-Return only the short spoken-style summary text.
+Return only the short spoken-style summary text for the current chunk.
 `;
+
 
 function newChat(){
   const now = new Date();
@@ -193,7 +204,7 @@ function pushToBuffer(chatID, msg) {
 
 function writeSse(res, { id, event, data }) {
   // Optional reconnection hint:
-  // res.write(`retry: 4000\n`);
+  res.write(`retry: 1000\n`);
   res.write(`id: ${id}\n`);
   if (event) res.write(`event: ${event}\n`);
   res.write(`data: ${JSON.stringify(data)}\n\n`);
@@ -388,11 +399,22 @@ app.get("/api/message/stream", async (req, res) => {
     workflow(intro_message, -1, signal);
 
     sendEvent("status", { stage: "reasoning" });
+
+
     let streamedAnswer = "";
-    let paragraphs = [];
-    let workloadPromises = {};
-    let currentIndex = 0;
-    let paragraphIndex = 0;
+    let chunks = {};
+
+    let chunkIsOpen = false;
+    let safeToSend = "";
+    let buffer = "";
+
+    const OPEN = "<開>";
+    const CLOSE = "<閉>";
+    const setOfDelineator = new Set(OPEN + CLOSE);
+    const openRegex = new RegExp(OPEN, "g")
+    const closeRegex = new RegExp(CLOSE, "g")
+
+
     await streamAnswer(chatID, {
       signal,
       onToken: async ({ token, text, done }) => {
@@ -400,18 +422,40 @@ app.get("/api/message/stream", async (req, res) => {
         if (streamClosed) {
            const buffer = chats[chatID].reasoningBuffer
            chats[chatID][0].push({ role: "assistant", content: buffer});
-           chats[chatID][0].push({ role: "user", content: "*USER INTERRUPTED ON PARAGRAPH *" + paragraphIndex});
+           chats[chatID][0].push({ role: "user", content: "*USER INTERRUPTED ON CHUNK *" + paragraphIndex});
           return;
         }
-        //console.log("still running");
-        paragraphs = text.split(/\n\n/);
-        while (paragraphs.length-1 > currentIndex) { // -1 because we dont want to start work on the last item in the array as it may be an imcomplete paragraph 
-          const p = paragraphs[currentIndex].trim();
-          if (p) {
-            workloadPromises[currentIndex] = workflow(p, paragraphIndex);
-            paragraphIndex++;
+        buffer += token
+
+        let tokenSet = new Set(token);
+        let intersection = new Set([...tokenSet].filter(x => setOfDelineator.has(x)));
+
+        if (intersection.size === 0){
+          safeToSend += token;
+        }
+        else {
+          const opensplit = buffer.split(openRegex);
+          if ((opensplit.length > 2) || (opensplit.length === 0) || chunkIsOpen){
+            throw new Error("((opensplit.length > 2) || (opensplit.length === 0) || chunkIsOpen) is true");
           }
-          currentIndex++;
+          if (opensplit.length === 2){
+            buffer = opensplit[1];
+            if (opensplitp[0] !== ""){
+              throw new Error("Buffer contains string before Open dilinator. String: " + opensplitp[0])
+            }
+          }
+
+          const closesplit = buffer.split(closeRegex);
+          if ((closesplit.length > 2) || (closesplit.length === 0) || chunkIsOpen === false){
+            throw new Error("((closesplit.length > 2) || (closesplit.length === 0) || chunkIsOpen) is false");
+          }
+          if (closesplit.length === 2){
+            buffer = closesplitp[1];
+            chunks.push(closesplitp[0])
+            workflow(chunks[currentChunk].trim(), currentChunk).then(result => {
+              currentChunk++;
+            })
+          }
         }
         if (done) {
           const p = paragraphs.at(-1).trim();
