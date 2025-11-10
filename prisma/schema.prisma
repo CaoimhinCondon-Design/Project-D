@@ -8,31 +8,27 @@ datasource db {
 }
 
 model User {
-
-  id        String   @id @default(uuid())
-  email     String   @unique
+  id           String   @id @default(uuid())
+  email        String   @unique
   passwordHash String
-  createdAt DateTime @default(now())
-
-  chats Chat[]
+  createdAt    DateTime @default(now())
+  chats        Chat[]
 }
 
 model Chat {
-
-  id        String   @id @default(uuid())
-  user      User     @relation(fields: [userId], references: [id])
+  id        String    @id @default(uuid())
   userId    String
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   title     String?
+  user      User      @relation(fields: [userId], references: [id])
   messages  Message[]
 }
 
 model Message {
-
   id        String   @id @default(uuid())
-  chat      Chat     @relation(fields: [chatId], references: [id])
   chatId    String
-  role      String   // "user" | "assistant"
+  role      String
   content   String
   createdAt DateTime @default(now())
+  chat      Chat     @relation(fields: [chatId], references: [id])
 }
