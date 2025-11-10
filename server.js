@@ -1,12 +1,18 @@
 import express from "express";
 import dotenv from "dotenv";
 import { OpenAI } from "openai";
+import { PrismaClient } from "@prisma/client/extension";
+import cookieParser from "cookie-parser";
+import crypto from "crypto";
+
 dotenv.config();
 const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
+const prisma = new PrismaClient();
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+app.use(cookieParser());
 app.use(express.static("public"));
 app.use(express.json({ limit: "25mb" })); // for base64 JSON payloads
 
@@ -15,6 +21,53 @@ let chats = {};
 function wait(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
+
+// ==============================
+// Database Helpers
+// ==============================
+
+async function getOrCreateAnotherUser(req, res) {
+
+  let anonId = req.cookies.anonId;
+
+  if (!anonId) {
+
+    anonId = crypto.randomUUID
+      
+    // Set a long-lived cookie
+    res.cookie("anonID", anonId, {
+
+      httpOnly: true,
+      sameSite: "lax",
+      maxAge: 1000 * 60 * 60 * 24 * 365, // 1 year
+    });
+  }
+
+  const anonEmail = 'anon_${anonId}@placeholder.local'
+
+  const user = await prisma.user.upsert({
+
+    where: { email: anonEmail},
+    update: {},
+    create: {
+      email: anonEmail,
+      passwordHash: "ANON", // This is just a place holder, real auth will ignore this 
+    },
+  });
+
+  return user;
+}
+
+// Simple health check to make sure db connection is good
+app.get("/health/db", async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ ok: false });
+  }
+});
 
 // Helper: call OpenAI Audio->Transcriptions (Whisper)
 async function transcribeWebmBase64(audioBase64) {
@@ -216,16 +269,29 @@ function writeSse(res, { id, event, data }) {
 /**
  * get and POST /api/message/stream
  */
-app.get("/api/new_chat", (_req, res) => {
+app.get("/api/new_chat", async (_req, res) => {
+  
   try{
-    let chatID = newChat();
+    
+    const user = await getOrCreateAnotherUser(_req, res);
+
+    const chatID = newChat();
+
+    await prisma.chat.create({
+      data: {
+        id: chatID, // Reuse the existing chat ID
+        userID: user.id,
+        title: null,
+      }
+    });
+
     res.json({chatID});
   }
   catch (e){
     console.error(e);
     res.status(500).json({ error: "new_chat_creation_failed" });
   }
-})
+});
 
 app.get('/data', (req, res) => {
   const { chatID } = req.query;
