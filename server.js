@@ -364,16 +364,23 @@ app.get("/api/message/stream", async (req, res) => {
     }
   }
 
-  let currentConvoIndex = -1;
+  let currentChunk = -1;
 
-  async function workflow(paragraph, index, signal){
-    while (currentConvoIndex !== index){await wait(1000)
+  async function workflow(workingChunk, index, signal){
+    let paragraph = "";
+    while (currentChunk !== index){await wait(100)
       //console.log(currentConvoIndex + " ==? " + index)
     }
+    if (Array.isArray(workingChunk)){
+      paragraph = workingChunk[index];
+    }
+    else{
+      paragraph = workingChunk
+    }
+    paragraph = paragraph.trim()
     if (streamClosed) return;
-    sendEvent("subStatus", { stage: `working on paragraph ${index}`, currentParagraph: paragraph });
+    sendEvent("subStatus", { stage: `working on chunk ${index}`, currentParagraph: paragraph });
     const shortSummary = await summarizeForSpeech(paragraph, chatID, signal);
-    currentConvoIndex++
     let ttsDataUrl = ''
     if (shortSummary !== ''){
         ttsDataUrl = await speakWithTTS(shortSummary);
@@ -396,13 +403,14 @@ app.get("/api/message/stream", async (req, res) => {
   try {
     sendEvent("status", { stage: "user quick response" });
     const intro_message = 'Write 1-2 short conversational sentences taking in the users question. Do not get into the content of the question. merly sound like you are thinking about it. Also phrase things in a unque way from the previous ones you\'ve done ';
-    workflow(intro_message, -1, signal);
+    await workflow(intro_message, -1, signal);
+    currentChunk ++; //todo get rid of this
 
     sendEvent("status", { stage: "reasoning" });
 
 
     let streamedAnswer = "";
-    let chunks = {};
+    let chunks = [];
 
     let chunkIsOpen = false;
     let safeToSend = "";
@@ -427,50 +435,51 @@ app.get("/api/message/stream", async (req, res) => {
         }
         buffer += token
 
-        let tokenSet = new Set(token);
-        let intersection = new Set([...tokenSet].filter(x => setOfDelineator.has(x)));
+        let bufferSet = new Set(buffer);
+        let intersection = new Set([...bufferSet].filter(x => setOfDelineator.has(x)));
 
         if (intersection.size === 0){
-          safeToSend += token;
+          true;
         }
         else {
           const opensplit = buffer.split(openRegex);
-          if ((opensplit.length > 2) || (opensplit.length === 0) || chunkIsOpen){
-            throw new Error("((opensplit.length > 2) || (opensplit.length === 0) || chunkIsOpen) is true");
+          if ((opensplit.length > 2) || (opensplit.length === 0)){
+            throw new Error("((opensplit.length > 2) = " + (opensplit.length > 2) + ", (opensplit.length === 0) = " + (opensplit.length === 0));
           }
           if (opensplit.length === 2){
+            if (chunkIsOpen === true){
+              throw new Error("2 consective open chunks")
+            }
+            chunkIsOpen = true
             buffer = opensplit[1];
-            if (opensplitp[0] !== ""){
-              throw new Error("Buffer contains string before Open dilinator. String: " + opensplitp[0])
+            if (opensplit[0].trim() !== ""){
+              throw new Error("Buffer contains string before Open dilinator. String: " + opensplit[0].trim())
             }
           }
 
           const closesplit = buffer.split(closeRegex);
-          if ((closesplit.length > 2) || (closesplit.length === 0) || chunkIsOpen === false){
-            throw new Error("((closesplit.length > 2) || (closesplit.length === 0) || chunkIsOpen) is false");
+          if ((closesplit.length > 2) || (closesplit.length === 0)){
+            throw new Error("((closesplit.length > 2) || (closesplit.length === 0)" + "\n buffer: " + buffer + "\n\n all text \n" + text);
           }
           if (closesplit.length === 2){
-            buffer = closesplitp[1];
-            chunks.push(closesplitp[0])
-            workflow(chunks[currentChunk].trim(), currentChunk).then(result => {
+            if (chunkIsOpen === false){
+              throw new Error("2 consective closed chunks")
+            }
+            chunkIsOpen = false
+            buffer = closesplit[1];
+            safeToSend += closesplit[0];
+            chunks.push(closesplit[0])
+            console.log(currentChunk + " , " + chunks.length + " , " + chunks[currentChunk])
+            workflow(chunks, currentChunk).then(result => {
               currentChunk++;
             })
           }
         }
         if (done) {
-          const p = paragraphs.at(-1).trim();
-          if (p) {
-            workloadPromises[currentIndex] = workflow(p, currentIndex);
-          }
-          streamedAnswer = text?.trim() ?? "";
+          streamedAnswer = safeToSend?.trim() ?? "";
           sendEvent("answer", { answer: streamedAnswer });
-          const results = await Promise.allSettled(Object.values(workloadPromises));
-          console.log("\n\n\n\n\n\n results \n\n")
-          for (const result of results) {
-            //console.log(result)
-          }
         } else if (token) {
-          sendEvent("token", { token, text });
+          sendEvent("token", { token, safeToSend});
         }
       }
     });
