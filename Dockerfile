@@ -34,5 +34,5 @@ COPY . .
 # Expose the port that the application listens on.
 EXPOSE 3000
 
-# Run the application.
-CMD npm start
+# Use our entrypoint to run migrations then start the app
+ENTRYPOINT ["./docker-entrypoint.sh"]

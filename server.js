@@ -1,7 +1,7 @@
 import express from "express";
 import dotenv from "dotenv";
 import { OpenAI } from "openai";
-import { PrismaClient } from "@prisma/client/extension";
+import { PrismaClient } from "@prisma/client";
 // import cookieParser from "cookie-parser";
 import crypto from "crypto";
 
