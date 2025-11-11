@@ -8,9 +8,6 @@ until nc -z db 5432; do
   sleep 1
 done
 
-echo "Generating Prisma client..."
-npx prisma generate
-
 echo "Running Prisma migrations..."
 npx prisma migrate deploy
 
